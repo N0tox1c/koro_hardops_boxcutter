@@ -29,7 +29,8 @@ class KORO_PT_hardsurface(Panel):
         row = box.row(align=True)
         row.operator("koro.repeat_last_cutter", text="Repeat", icon='DUPLICATE')
         row.operator("koro.stamp_cutter", text="Stamp", icon='BRUSH_DATA')
-        row.operator("koro.edit_cutter", text="Edit", icon='EDITMODE_HLT')
+        row.operator("koro.edit_cutter", text="Mesh Edit", icon='EDITMODE_HLT')
+        box.operator("koro.parametric_cutter_edit", text="Parametric Edit", icon='MODIFIER')
 
         col = layout.column(align=True)
         col.label(text="Boolean")
@@ -105,6 +106,11 @@ class KORO_PT_hardsurface(Panel):
         sub = col.column(align=True)
         sub.enabled = s.taper_enabled
         sub.prop(s, "taper_factor")
+        col.prop(s, "wedge_enabled")
+        sub = col.column(align=True)
+        sub.enabled = s.wedge_enabled
+        sub.prop(s, "wedge_factor")
+        sub.prop(s, "wedge_axis")
         col.prop(s, "mirror_mode")
         col.prop(s, "mirror_origin")
         col.prop(s, "show_origin_gizmo")
@@ -152,7 +158,9 @@ class KORO_PT_hardsurface(Panel):
         row.prop(s, "quick_array_axis", text="Axis")
         row.prop(s, "quick_array_count", text="Count")
         box.prop(s, "quick_array_gap")
-        box.operator("koro.quick_array", text="Quick Array", icon='MOD_ARRAY')
+        row = box.row(align=True)
+        row.operator("koro.array_modal", text="Array Modal", icon='MOD_ARRAY')
+        row.operator("koro.quick_array", text="Apply", icon='CHECKMARK')
         row = box.row(align=True)
         row.prop(s, "dice_x", toggle=True)
         row.prop(s, "dice_y", toggle=True)
@@ -162,7 +170,9 @@ class KORO_PT_hardsurface(Panel):
         row.prop(s, "dice_count_y", text="Y")
         row.prop(s, "dice_count_z", text="Z")
         box.prop(s, "dice_merge_distance")
-        box.operator("koro.dice", text="Dice Active Mesh", icon='MOD_WIREFRAME')
+        row = box.row(align=True)
+        row.operator("koro.dice_modal", text="Dice Modal", icon='MOD_WIREFRAME')
+        row.operator("koro.dice", text="Apply", icon='CHECKMARK')
 
         layout.separator()
         col = layout.column(align=True)
@@ -174,6 +184,11 @@ class KORO_PT_hardsurface(Panel):
         dots = col.column(align=True)
         dots.enabled = s.show_dots
         dots.prop(s, "dot_size")
+        col.prop(s, "show_parameter_handles")
+        handles = col.column(align=True)
+        handles.enabled = s.show_parameter_handles
+        handles.prop(s, "handle_size")
+        handles.prop(s, "handle_pick_radius")
         col.operator("koro.toggle_cutters", text="Show / Hide Cutters")
 
         layout.separator()

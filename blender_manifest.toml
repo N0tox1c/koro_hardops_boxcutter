@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "koro_hardops_boxcutter"
-version = "0.8.0"
+version = "0.9.0"
 name = "KORO HardOps BoxCutter"
 tagline = "Non-destructive hard-surface cutters for Blender 5.2"
 maintainer = "KORO Toolkit"

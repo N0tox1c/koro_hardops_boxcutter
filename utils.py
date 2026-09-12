@@ -56,6 +56,226 @@ def last_cutter(scene):
     return max(candidates, key=lambda o: int(o.get("koro_cutter_serial", 0)))
 
 
+
+
+def infer_profile_points_from_mesh(obj):
+    """Infer the largest open boundary loop in cutter-local XY space.
+
+    This is primarily a v0.8 -> v0.9 migration path.  It preserves Box/Circle
+    and most NGon base profiles; for pathological meshes the editor remains
+    unavailable rather than guessing destructive topology.
+    """
+    if obj is None or obj.type != 'MESH' or len(obj.data.vertices) < 3:
+        return []
+    bm=bmesh.new(); bm.from_mesh(obj.data)
+    try:
+        boundary=[e for e in bm.edges if len(e.link_faces) == 1]
+        if not boundary:
+            return []
+        adjacency={}
+        for e in boundary:
+            a,b=e.verts
+            adjacency.setdefault(a,[]).append(b); adjacency.setdefault(b,[]).append(a)
+        loops=[]
+        # Traverse connected boundary components using vertex adjacency.
+        visited=set()
+        for start in list(adjacency):
+            if start in visited: continue
+            comp=[]; stack=[start]
+            while stack:
+                v=stack.pop()
+                if v in visited: continue
+                visited.add(v); comp.append(v)
+                for n in adjacency.get(v,[]):
+                    if n not in visited: stack.append(n)
+            if len(comp) < 3: continue
+            # Order a degree-2 component into a loop.
+            ordered=[comp[0]]; prev=None; cur=comp[0]
+            for _ in range(len(comp)+2):
+                nxts=[n for n in adjacency.get(cur,[]) if n != prev]
+                if not nxts: break
+                nxt=nxts[0]
+                if nxt == ordered[0]: break
+                if nxt in ordered:
+                    alt=[n for n in nxts if n not in ordered]
+                    if not alt: break
+                    nxt=alt[0]
+                ordered.append(nxt); prev,cur=cur,nxt
+            if len(ordered) >= 3:
+                pts=[(float(v.co.x), float(v.co.y)) for v in ordered]
+                if abs(polygon_area_2d(pts)) > 1e-10:
+                    loops.append(pts)
+        if not loops:
+            return []
+        return ensure_ccw(max(loops, key=lambda pts: abs(polygon_area_2d(pts))))
+    finally:
+        bm.free()
+
+
+def ensure_parametric_metadata(context, cutter, target=None):
+    """Upgrade a legacy KORO cutter in-place to v0.9 parametric metadata."""
+    if cutter is None or cutter.type != 'MESH':
+        return False
+    if len(cutter_profile_points(cutter)) >= 3:
+        return True
+    points=infer_profile_points_from_mesh(cutter)
+    if len(points) < 3:
+        return False
+    if target is None:
+        target=find_target_for_cutter(context.scene, cutter)
+    s=context.scene.koro_hs
+    bevel=cutter.modifiers.get(CUTTER_BEVEL_NAME)
+    taper=cutter.modifiers.get(TAPER_NAME)
+    linear=cutter.modifiers.get(ARRAY_NAME)
+    radial=cutter.modifiers.get(RADIAL_ARRAY_NAME)
+    mirror=cutter.modifiers.get(MIRROR_NAME)
+    solid=cutter.modifiers.get(SOLIDIFY_NAME)
+    array_mode='RADIAL' if radial else 'LINEAR' if linear else 'OFF'
+    count=int((radial or linear).count) if (radial or linear) else int(s.array_count)
+    gap=float(s.array_gap)
+    if linear and getattr(linear,'use_constant_offset',False):
+        gap=float(linear.constant_offset_displace[0]) - polygon_span_x(points)
+    store_cutter_profile_metadata(
+        cutter, points,
+        operation=str(cutter.get('koro_operation','DIFFERENCE')),
+        shape=str(cutter.get('koro_shape','NGON')),
+        inset_enabled=bool(cutter.get('koro_inset_enabled',False)), inset_amount=float(cutter.get('koro_inset_amount',s.inset_amount)),
+        offset_amount=float(cutter.get('koro_offset_amount',0.0)), depth=float(cutter.get('koro_depth',s.default_depth)), depth_scale=1.0,
+        through=bool(cutter.get('koro_through',False)), through_margin=float(s.through_margin), surface_offset=float(s.surface_offset),
+        live_solidify=bool(solid is not None), solidify_even=bool(getattr(solid,'use_even_offset',s.solidify_even) if solid else s.solidify_even),
+        extrude_direction=str(cutter.get('koro_extrude_direction',s.extrude_direction)),
+        cutter_bevel_enabled=bool(bevel is not None), cutter_bevel_width=float(bevel.width if bevel else s.cutter_bevel_width),
+        cutter_bevel_segments=int(bevel.segments if bevel else s.cutter_bevel_segments),
+        taper_enabled=bool(taper is not None), taper_factor=float(taper.factor if taper else 0.0),
+        wedge_enabled=False, wedge_factor=0.0, wedge_axis='X',
+        array_mode=array_mode, array_count=count, array_gap=gap, radial_sweep=float(s.radial_sweep), radial_origin=Vector((0.0,0.0)),
+        mirror_mode=('XY' if mirror and mirror.use_axis[0] and mirror.use_axis[1] else 'X' if mirror and mirror.use_axis[0] else 'Y' if mirror and mirror.use_axis[1] else 'OFF'),
+        mirror_origin='CUTTER', draw_origin=str(cutter.get('koro_draw_origin',s.draw_origin)),
+    )
+    cutter['koro_migrated_from'] = '0.8'
+    return True
+
+
+def find_target_for_cutter(scene, cutter):
+    """Return the first mesh object whose Boolean modifier references ``cutter``."""
+    if cutter is None:
+        return None
+    for obj in scene.objects:
+        if obj.type != 'MESH':
+            continue
+        for mod in obj.modifiers:
+            if mod.type != 'BOOLEAN' or getattr(mod, 'operand_type', 'OBJECT') != 'OBJECT':
+                continue
+            if getattr(mod, 'object', None) == cutter:
+                return obj
+    return None
+
+
+def store_cutter_profile_metadata(cutter, points2d, **state):
+    """Persist enough parametric state to rebuild/edit a cutter after confirmation."""
+    if cutter is None:
+        return
+    flat=[]
+    for p in points2d or []:
+        flat.extend((float(p[0]), float(p[1])))
+    cutter['koro_profile_points'] = flat
+    cutter['koro_profile_version'] = 1
+    for key, value in state.items():
+        if value is None:
+            continue
+        name=f'koro_{key}'
+        if isinstance(value, Vector):
+            cutter[name] = [float(v) for v in value]
+        elif isinstance(value, (tuple, list)):
+            cutter[name] = [float(v) if isinstance(v, (int, float)) else v for v in value]
+        else:
+            cutter[name] = value
+
+
+def cutter_profile_points(cutter):
+    raw = cutter.get('koro_profile_points', []) if cutter else []
+    try:
+        values=list(raw)
+    except Exception:
+        return []
+    if len(values) < 6 or len(values) % 2:
+        return []
+    return [(float(values[i]), float(values[i+1])) for i in range(0, len(values), 2)]
+
+
+def _metadata_z_range(context, cutter, target):
+    depth=max(float(cutter.get('koro_depth', 0.2)), 1e-6)
+    depth_scale=max(float(cutter.get('koro_depth_scale', 1.0)), 0.01)
+    depth*=depth_scale
+    offset=float(cutter.get('koro_offset_amount', 0.0))
+    direction=str(cutter.get('koro_extrude_direction', 'NEGATIVE'))
+    through=bool(cutter.get('koro_through', False))
+    surface=float(cutter.get('koro_surface_offset', context.scene.koro_hs.surface_offset if hasattr(context.scene, 'koro_hs') else 0.001))
+    if through and target is not None:
+        margin=float(cutter.get('koro_through_margin', context.scene.koro_hs.through_margin if hasattr(context.scene, 'koro_hs') else 0.02))
+        zmin,zmax=object_bounds_in_matrix(target, cutter.matrix_world, max(margin, surface))
+        return zmin, zmax+offset
+    if direction == 'BOTH':
+        return -depth*0.5, depth*0.5+offset
+    if direction == 'POSITIVE':
+        return -surface, depth+offset
+    return -depth, surface+offset
+
+
+def rebuild_cutter_from_metadata(context, cutter, target=None):
+    """Rebuild cutter mesh/modifiers from the v0.9 parametric metadata.
+
+    Returns ``True`` when the cutter had a stored profile and could be rebuilt.
+    """
+    if cutter is None or cutter.type != 'MESH':
+        return False
+    points=cutter_profile_points(cutter)
+    if len(points) < 3:
+        return False
+    if target is None:
+        target=find_target_for_cutter(context.scene, cutter)
+    zmin,zmax=_metadata_z_range(context, cutter, target)
+    inset=float(cutter.get('koro_inset_amount', 0.0)) if bool(cutter.get('koro_inset_enabled', False)) else 0.0
+    live=bool(cutter.get('koro_live_solidify', True))
+    wedge=bool(cutter.get('koro_wedge_enabled', False))
+    wedge_factor=float(cutter.get('koro_wedge_factor', 0.0))
+    wedge_axis=str(cutter.get('koro_wedge_axis', 'X'))
+    even=bool(cutter.get('koro_solidify_even', True))
+    if wedge:
+        ensure_solidify(cutter, False)
+        ok=update_wedge_prism_mesh(cutter, points, zmin, zmax, inset, wedge_factor, wedge_axis)
+    elif live:
+        center=(zmin+zmax)*0.5
+        ok=update_profile_mesh(cutter, points, center, inset)
+        ensure_solidify(cutter, ok, max(zmax-zmin, 1e-7), even)
+    else:
+        ensure_solidify(cutter, False)
+        ok=update_prism_mesh(cutter, points, zmin, zmax, inset)
+    if not ok:
+        return False
+    bevel_enabled=bool(cutter.get('koro_cutter_bevel_enabled', False))
+    ensure_cutter_bevel(cutter, float(cutter.get('koro_cutter_bevel_width', 0.01)), int(cutter.get('koro_cutter_bevel_segments', 3)), bevel_enabled)
+    taper_enabled=bool(cutter.get('koro_taper_enabled', False)) and not wedge
+    ensure_taper(cutter, taper_enabled, float(cutter.get('koro_taper_factor', 0.0)))
+    array_mode=str(cutter.get('koro_array_mode', 'OFF'))
+    count=int(cutter.get('koro_array_count', 2))
+    gap=float(cutter.get('koro_array_gap', 0.05))
+    ensure_array(cutter, array_mode == 'LINEAR', count, gap, polygon_span_x(points))
+    ro=cutter.get('koro_radial_origin', [0.0,0.0])
+    try:
+        ro=Vector((float(ro[0]), float(ro[1])))
+    except Exception:
+        ro=Vector((0.0,0.0))
+    ensure_radial_array(context, cutter, array_mode == 'RADIAL', count, float(cutter.get('koro_radial_sweep', math.tau)), ro, visible=False)
+    mirror_mode=str(cutter.get('koro_mirror_mode', 'OFF'))
+    mirror_origin=str(cutter.get('koro_mirror_origin', 'CUTTER'))
+    mirror_ref=ensure_origin_gizmo(context, cutter, target, mirror_origin, False)
+    ensure_mirror(cutter, mirror_mode, mirror_ref)
+    sort_cutter_modifiers(cutter)
+    cutter.data.update()
+    return True
+
+
 def duplicate_cutter(context, source, name_prefix="KORO_Repeat"):
     """Deep-copy a cutter and remap helper-object references used by live modifiers."""
     if source is None or source.type != 'MESH':
@@ -526,6 +746,56 @@ def update_prism_mesh(obj, points2d, z_min, z_max, inset_amount=0.0):
     mesh.update(calc_edges=True)
     return True
 
+
+
+def update_wedge_prism_mesh(obj, points2d, z_min, z_max, inset_amount=0.0, factor=0.0, axis='X'):
+    """Build a real wedge prism by sloping the top surface across local X or Y."""
+    if not obj or obj.type != 'MESH' or len(points2d) < 3:
+        return False
+    outer=ensure_ccw(points2d)
+    if abs(polygon_area_2d(outer)) < 1e-10:
+        return False
+    inner=offset_polygon(outer, inset_amount) if inset_amount > 0.0 else None
+    if inner and (len(inner) != len(outer) or abs(polygon_area_2d(inner)) >= abs(polygon_area_2d(outer))):
+        inner=None
+    values=[p[0] if axis == 'X' else p[1] for p in outer]
+    lo=min(values); hi=max(values); span=max(hi-lo, 1e-9)
+    depth=max(z_max-z_min, 1e-8)
+    def top_z(p):
+        v=p[0] if axis == 'X' else p[1]
+        t=(v-lo)/span - 0.5
+        return z_max + float(factor)*depth*t
+    verts=[]; faces=[]; n=len(outer)
+    if inner is None:
+        verts.extend((x,y,z_min) for x,y in outer)
+        verts.extend((x,y,top_z((x,y))) for x,y in outer)
+        faces.append(tuple(reversed(range(n))))
+        faces.append(tuple(range(n,2*n)))
+        for i in range(n):
+            j=(i+1)%n
+            faces.append((i,j,n+j,n+i))
+    else:
+        verts.extend((x,y,z_min) for x,y in outer)
+        verts.extend((x,y,top_z((x,y))) for x,y in outer)
+        verts.extend((x,y,z_min) for x,y in inner)
+        verts.extend((x,y,top_z((x,y))) for x,y in inner)
+        ob,ot,ib,it=0,n,2*n,3*n
+        for i in range(n):
+            j=(i+1)%n
+            faces.append((ob+i,ob+j,ot+j,ot+i))
+            faces.append((ib+i,it+i,it+j,ib+j))
+            faces.append((ot+i,ot+j,it+j,it+i))
+            faces.append((ob+i,ib+i,ib+j,ob+j))
+    mesh=obj.data
+    try:
+        mesh.clear_geometry()
+    except AttributeError:
+        old=mesh; mesh=bpy.data.meshes.new(f'{obj.name}Mesh'); obj.data=mesh
+        if old.users == 0:
+            bpy.data.meshes.remove(old)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update(calc_edges=True)
+    return True
 
 
 def update_profile_mesh(obj, points2d, z=0.0, inset_amount=0.0):
