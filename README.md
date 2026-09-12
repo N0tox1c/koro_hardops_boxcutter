@@ -1,4 +1,4 @@
-# KORO HardOps + BoxCutter Core v0.8.0
+# KORO HardOps + BoxCutter Core v0.9.0
 
 Independent hard-surface workflow extension for **Blender 5.2+** inspired by modern Boolean-modeling interaction patterns. It contains no Hard Ops / Boxcutter source code or proprietary assets.
 
@@ -7,9 +7,66 @@ Independent hard-surface workflow extension for **Blender 5.2+** inspired by mod
 1. Open Blender 5.2 or newer.
 2. Go to **Edit > Preferences > Extensions**.
 3. Choose **Install from Disk**.
-4. Select `koro_hardops_boxcutter-0.8.0.zip`.
+4. Select `koro_hardops_boxcutter-0.9.0.zip`.
 5. Enable **KORO HardOps BoxCutter** if needed.
 6. Use **Q** in Object Mode or **N > KORO HS**.
+
+
+## v0.9 highlights
+
+### Draggable parameter handles
+
+Live cutters now expose three viewport handles during the depth stage:
+
+- **Depth** handle — drag cutter depth directly;
+- **Inset** handle — drag ring/panel width;
+- **Bevel** handle — drag cutter bevel width.
+
+`Ctrl` snaps handle adjustments. Handle size and pick radius are configurable in **N > KORO HS > Cutter Lifecycle**.
+
+### Parametric Cutter Edit
+
+**Q > Parametric Edit** re-opens a confirmed KORO cutter without applying the Boolean. The editor supports:
+
+- `D` Depth;
+- `I` Inset;
+- `B` cutter Bevel;
+- `O` Offset;
+- `T` Taper;
+- `W` Real Wedge;
+- `A` Array Count;
+- `G` Array Gap;
+- `Tab` next parameter;
+- `X/Y` wedge axis;
+- mouse / wheel adjustment;
+- `Enter` confirm;
+- `Esc/RMB` full rollback.
+
+New v0.9 cutters persist their 2D profile and modeling metadata. Legacy v0.8 cutters are automatically migrated when possible by recovering the largest boundary loop from the base cutter mesh and reading existing live modifiers.
+
+### Real Wedge geometry
+
+`Alt+W` enters a real wedge phase. Unlike the existing Simple Deform Taper, the cutter mesh is rebuilt as an actual sloped prism. `X` / `Y` chooses the local slope axis and `Ctrl` quantizes the factor. Wedge and Taper remain separate tools.
+
+### Array Modal
+
+**Q > Array Modal** provides a live hard-surface Array workflow:
+
+- mouse — physical gap;
+- wheel — count;
+- `X/Y/Z` — local axis;
+- `Enter/LMB` — accept;
+- `Esc/RMB` — restore the previous modifier state.
+
+### Dice Modal
+
+**Q > Dice Modal** configures destructive Dice before touching topology:
+
+- `X/Y/Z` — select and enable axis;
+- `Shift+X/Y/Z` — toggle axis;
+- wheel — cutting-plane count on current axis;
+- `Enter/LMB` — run the existing BMesh bisect Dice;
+- `Esc/RMB` — cancel without modifying the mesh.
 
 ## v0.8 highlights
 

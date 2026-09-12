@@ -139,6 +139,19 @@ class KORO_HS_Settings(bpy.types.PropertyGroup):
     taper_factor: FloatProperty(
         name="Taper Factor", default=0.0, min=-10.0, max=10.0, soft_min=-2.0, soft_max=2.0
     )
+    wedge_enabled: BoolProperty(
+        name="Real Wedge",
+        description="Build a real sloped cutter prism instead of a Simple Deform taper",
+        default=False,
+    )
+    wedge_factor: FloatProperty(
+        name="Wedge Factor", default=0.0, min=-4.0, max=4.0, soft_min=-1.5, soft_max=1.5
+    )
+    wedge_axis: EnumProperty(
+        name="Wedge Axis",
+        items=(('X', "X", "Slope top face across local X"), ('Y', "Y", "Slope top face across local Y")),
+        default='X',
+    )
 
     show_dots: BoolProperty(
         name="BoxCutter Dots",
@@ -146,6 +159,13 @@ class KORO_HS_Settings(bpy.types.PropertyGroup):
         default=True,
     )
     dot_size: FloatProperty(name="Dot Size", default=8.0, min=2.0, max=32.0)
+    show_parameter_handles: BoolProperty(
+        name="Parameter Handles",
+        description="Show draggable Depth / Inset / Bevel handles on the live cutter",
+        default=True,
+    )
+    handle_size: FloatProperty(name="Handle Size", default=12.0, min=4.0, max=40.0)
+    handle_pick_radius: IntProperty(name="Handle Pick Radius", default=18, min=6, max=64)
 
     mirror_mode: EnumProperty(
         name="Mirror",

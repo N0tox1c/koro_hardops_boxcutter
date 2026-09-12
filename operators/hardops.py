@@ -245,6 +245,255 @@ class KORO_OT_toggle_cutters(Operator):
 
 
 
+class KORO_OT_parametric_cutter_edit(Operator):
+    bl_idname = "koro.parametric_cutter_edit"
+    bl_label = "Parametric Cutter Edit"
+    bl_description = "Re-open a v0.9 KORO cutter and edit stored parametric values without baking the Boolean"
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
+
+    _handle = None
+    cutter = None
+    target = None
+    parameter = 'DEPTH'
+    start_x = 0
+    start_value = 0.0
+    original = None
+
+    PARAMS = ('DEPTH', 'INSET', 'BEVEL', 'OFFSET', 'TAPER', 'WEDGE', 'ARRAY_COUNT', 'ARRAY_GAP')
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return context.area and context.area.type == 'VIEW_3D' and context.mode == 'OBJECT' and obj is not None
+
+    def _find_cutter(self, context):
+        active = context.active_object
+        if active and active.type == 'MESH' and active.get('koro_cutter', False):
+            return active
+        if active and active.type == 'MESH':
+            for mod in reversed(list(active.modifiers)):
+                if mod.type == 'BOOLEAN' and getattr(mod, 'operand_type', 'OBJECT') == 'OBJECT':
+                    ob = getattr(mod, 'object', None)
+                    if ob and ob.type == 'MESH' and ob.get('koro_cutter', False):
+                        return ob
+        return utils.last_cutter(context.scene)
+
+    def _value(self):
+        c = self.cutter
+        if self.parameter == 'DEPTH': return float(c.get('koro_depth', 0.2))
+        if self.parameter == 'INSET': return float(c.get('koro_inset_amount', 0.025))
+        if self.parameter == 'BEVEL': return float(c.get('koro_cutter_bevel_width', 0.01))
+        if self.parameter == 'OFFSET': return float(c.get('koro_offset_amount', 0.0))
+        if self.parameter == 'TAPER': return float(c.get('koro_taper_factor', 0.0))
+        if self.parameter == 'WEDGE': return float(c.get('koro_wedge_factor', 0.0))
+        if self.parameter == 'ARRAY_COUNT': return float(c.get('koro_array_count', 2))
+        return float(c.get('koro_array_gap', 0.05))
+
+    def _set_value(self, value):
+        c = self.cutter
+        if self.parameter == 'DEPTH': c['koro_depth'] = max(0.0001, float(value))
+        elif self.parameter == 'INSET':
+            c['koro_inset_enabled'] = True; c['koro_inset_amount'] = max(0.00001, float(value))
+        elif self.parameter == 'BEVEL':
+            c['koro_cutter_bevel_enabled'] = True; c['koro_cutter_bevel_width'] = max(0.0, float(value))
+        elif self.parameter == 'OFFSET': c['koro_offset_amount'] = float(value)
+        elif self.parameter == 'TAPER':
+            c['koro_taper_enabled'] = True; c['koro_taper_factor'] = max(-10.0, min(10.0, float(value)))
+        elif self.parameter == 'WEDGE':
+            c['koro_wedge_enabled'] = True; c['koro_wedge_factor'] = max(-4.0, min(4.0, float(value)))
+        elif self.parameter == 'ARRAY_COUNT':
+            c['koro_array_count'] = max(2, min(256, int(round(value))))
+            if c.get('koro_array_mode', 'OFF') == 'OFF': c['koro_array_mode'] = 'LINEAR'
+        elif self.parameter == 'ARRAY_GAP':
+            c['koro_array_gap'] = float(value)
+            if c.get('koro_array_mode', 'OFF') == 'OFF': c['koro_array_mode'] = 'LINEAR'
+
+    def _snapshot(self):
+        keys = [
+            'koro_depth','koro_inset_enabled','koro_inset_amount','koro_cutter_bevel_enabled','koro_cutter_bevel_width',
+            'koro_offset_amount','koro_taper_enabled','koro_taper_factor','koro_wedge_enabled','koro_wedge_factor','koro_wedge_axis',
+            'koro_array_mode','koro_array_count','koro_array_gap'
+        ]
+        return {k: self.cutter.get(k, None) for k in keys}
+
+    def _restore(self):
+        for key, value in self.original.items():
+            if value is None:
+                try: del self.cutter[key]
+                except Exception: pass
+            else:
+                self.cutter[key] = value
+        utils.rebuild_cutter_from_metadata(bpy.context, self.cutter, self.target)
+
+    def _draw_hud(self, context):
+        x, y = 28, context.region.height - 42
+        font = 0
+        def line(text, size=14):
+            nonlocal y
+            blf.position(font, x, y, 0)
+            try: blf.size(font, size)
+            except TypeError: blf.size(font, size, 72)
+            blf.draw(font, text); y -= 20
+        line('KORO PARAMETRIC EDIT v0.9', 18)
+        line(f'{self.cutter.name}  |  {self.parameter}: {self._value():.5g}')
+        line('Mouse = adjust | Wheel = fine | Tab = next parameter | D/I/B/O/T/W/A/G = direct')
+        line('X/Y = Wedge axis | LMB = re-anchor | Enter = finish | Esc/RMB = rollback', 12)
+
+    def _select_param(self, event_type):
+        mapping = {'D':'DEPTH','I':'INSET','B':'BEVEL','O':'OFFSET','T':'TAPER','W':'WEDGE','A':'ARRAY_COUNT','G':'ARRAY_GAP'}
+        if event_type in mapping:
+            self.parameter = mapping[event_type]
+            return True
+        return False
+
+    def _reanchor(self, event):
+        self.start_x = event.mouse_region_x
+        self.start_value = self._value()
+
+    def invoke(self, context, event):
+        self.cutter = self._find_cutter(context)
+        if self.cutter is None:
+            self.report({'WARNING'}, 'No KORO cutter found')
+            return {'CANCELLED'}
+        self.target = utils.find_target_for_cutter(context.scene, self.cutter)
+        if not utils.ensure_parametric_metadata(context, self.cutter, self.target):
+            self.report({'WARNING'}, 'Could not recover a parametric profile from this cutter')
+            return {'CANCELLED'}
+        self.original = self._snapshot()
+        self.parameter = 'DEPTH'
+        self._reanchor(event)
+        self.cutter.hide_set(False); self.cutter.hide_viewport = False
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(self._draw_hud, (context,), 'WINDOW', 'POST_PIXEL')
+        context.window.cursor_modal_set('SCROLL_X')
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _cleanup(self, context):
+        if self._handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW'); self._handle = None
+        try: context.window.cursor_modal_restore()
+        except Exception: pass
+        context.workspace.status_text_set(None)
+        if context.area: context.area.tag_redraw()
+
+    def modal(self, context, event):
+        if context.area: context.area.tag_redraw()
+        if event.type in {'ESC','RIGHTMOUSE'} and event.value == 'PRESS':
+            self._restore(); self._cleanup(context); return {'CANCELLED'}
+        if event.type in {'RET','NUMPAD_ENTER'} and event.value == 'PRESS':
+            self._cleanup(context); self.report({'INFO'}, f'Parametric edit saved: {self.cutter.name}'); return {'FINISHED'}
+        if event.type == 'TAB' and event.value == 'PRESS':
+            i = (self.PARAMS.index(self.parameter) + 1) % len(self.PARAMS); self.parameter = self.PARAMS[i]; self._reanchor(event); return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and self._select_param(event.type):
+            self._reanchor(event); return {'RUNNING_MODAL'}
+        if self.parameter == 'WEDGE' and event.value == 'PRESS' and event.type in {'X','Y'}:
+            self.cutter['koro_wedge_axis'] = event.type; utils.rebuild_cutter_from_metadata(context, self.cutter, self.target); return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            self._reanchor(event); return {'RUNNING_MODAL'}
+        if event.type == 'MOUSEMOVE':
+            dx = event.mouse_region_x - self.start_x
+            scale = max(self.target.dimensions.length if self.target else self.cutter.dimensions.length, 1.0)
+            if self.parameter in {'DEPTH','INSET','BEVEL','OFFSET','ARRAY_GAP'}:
+                step = 0.001 * scale
+            elif self.parameter == 'ARRAY_COUNT':
+                step = 0.05
+            else:
+                step = 0.01
+            value = self.start_value + dx * step
+            if event.ctrl:
+                if self.parameter == 'ARRAY_COUNT': value = round(value)
+                elif self.parameter in {'TAPER','WEDGE'}: value = round(value * 10.0) / 10.0
+                else:
+                    grid = max(context.scene.koro_hs.grid_size * 0.1, 0.0001); value = round(value / grid) * grid
+            self._set_value(value); utils.rebuild_cutter_from_metadata(context, self.cutter, self.target); return {'RUNNING_MODAL'}
+        if event.type in {'WHEELUPMOUSE','WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            direction = 1 if event.type == 'WHEELUPMOUSE' else -1
+            if self.parameter == 'ARRAY_COUNT': delta = direction
+            elif self.parameter in {'TAPER','WEDGE'}: delta = direction * 0.05
+            else: delta = direction * max(context.scene.koro_hs.grid_size * 0.05, 0.0001)
+            self._set_value(self._value() + delta); utils.rebuild_cutter_from_metadata(context, self.cutter, self.target); self._reanchor(event); return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+
+class KORO_OT_array_modal(Operator):
+    bl_idname = 'koro.array_modal'
+    bl_label = 'Array Modal'
+    bl_description = 'Interactive HardOps-style Array count/axis/gap editor'
+    bl_options = {'REGISTER','UNDO','BLOCKING'}
+
+    obj = None; mod = None; created = False; axis = 'X'; count = 3; gap = 0.05; start_x = 0; base_gap = 0.05; old = None
+
+    @classmethod
+    def poll(cls, context):
+        return context.area and context.area.type == 'VIEW_3D' and context.mode == 'OBJECT' and context.active_object and context.active_object.type == 'MESH'
+
+    def _apply(self):
+        axis_i = {'X':0,'Y':1,'Z':2}[self.axis]
+        self.mod.count = max(2, int(self.count)); self.mod.fit_type='FIXED_COUNT'; self.mod.use_relative_offset=False; self.mod.use_constant_offset=True
+        span=max(float(self.obj.dimensions[axis_i]),0.0001); vec=[0.0,0.0,0.0]; vec[axis_i]=span+self.gap; self.mod.constant_offset_displace=vec
+
+    def invoke(self, context, event):
+        s=context.scene.koro_hs; self.obj=context.active_object; self.axis=s.quick_array_axis; self.count=s.quick_array_count; self.gap=s.quick_array_gap
+        self.mod=self.obj.modifiers.get('KORO_QuickArray'); self.created=self.mod is None
+        if self.mod is None: self.mod=self.obj.modifiers.new(name='KORO_QuickArray', type='ARRAY')
+        self.old=(self.mod.count, tuple(self.mod.constant_offset_displace), self.mod.use_relative_offset, self.mod.use_constant_offset)
+        self.start_x=event.mouse_region_x; self.base_gap=self.gap; self._apply(); context.window_manager.modal_handler_add(self)
+        context.workspace.status_text_set('KORO Array Modal: Mouse gap | Wheel count | X/Y/Z axis | Enter/LMB accept | Esc rollback')
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'MOUSEMOVE':
+            scale=max(self.obj.dimensions.length,1.0); self.gap=self.base_gap+(event.mouse_region_x-self.start_x)*0.001*scale; self._apply(); return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and event.type in {'X','Y','Z'}:
+            self.axis=event.type; self._apply(); return {'RUNNING_MODAL'}
+        if event.type in {'WHEELUPMOUSE','WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            self.count=max(2,min(10000,self.count+(1 if event.type=='WHEELUPMOUSE' else -1))); self._apply(); return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and event.type in {'RET','NUMPAD_ENTER','LEFTMOUSE'}:
+            s=context.scene.koro_hs; s.quick_array_axis=self.axis; s.quick_array_count=self.count; s.quick_array_gap=self.gap; context.workspace.status_text_set(None); return {'FINISHED'}
+        if event.value == 'PRESS' and event.type in {'ESC','RIGHTMOUSE'}:
+            if self.created: self.obj.modifiers.remove(self.mod)
+            else:
+                self.mod.count=self.old[0]; self.mod.constant_offset_displace=self.old[1]; self.mod.use_relative_offset=self.old[2]; self.mod.use_constant_offset=self.old[3]
+            context.workspace.status_text_set(None); return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+
+class KORO_OT_dice_modal(Operator):
+    bl_idname = 'koro.dice_modal'
+    bl_label = 'Dice Modal'
+    bl_description = 'Interactive Dice setup; topology is changed only when confirmed'
+    bl_options = {'REGISTER','UNDO','BLOCKING'}
+
+    axis = 'X'; original = None
+
+    @classmethod
+    def poll(cls, context):
+        return context.area and context.area.type == 'VIEW_3D' and context.mode == 'OBJECT' and context.active_object and context.active_object.type == 'MESH'
+
+    def _status(self, context):
+        s=context.scene.koro_hs; count={'X':s.dice_count_x,'Y':s.dice_count_y,'Z':s.dice_count_z}[self.axis]
+        context.workspace.status_text_set(f'KORO Dice Modal: axis {self.axis} count {count} | X/Y/Z select | Shift+X/Y/Z toggle | Wheel count | Enter apply | Esc cancel')
+
+    def invoke(self, context, event):
+        s=context.scene.koro_hs; self.original=(s.dice_x,s.dice_y,s.dice_z,s.dice_count_x,s.dice_count_y,s.dice_count_z); self.axis='X'; self._status(context); context.window_manager.modal_handler_add(self); return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        s=context.scene.koro_hs
+        if event.value == 'PRESS' and event.type in {'X','Y','Z'}:
+            self.axis=event.type
+            attr='dice_'+event.type.lower()
+            if event.shift: setattr(s,attr,not getattr(s,attr))
+            else: setattr(s,attr,True)
+            self._status(context); return {'RUNNING_MODAL'}
+        if event.type in {'WHEELUPMOUSE','WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            attr='dice_count_'+self.axis.lower(); setattr(s,attr,max(1,min(128,getattr(s,attr)+(1 if event.type=='WHEELUPMOUSE' else -1)))); self._status(context); return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and event.type in {'RET','NUMPAD_ENTER','LEFTMOUSE'}:
+            context.workspace.status_text_set(None); return bpy.ops.koro.dice('EXEC_DEFAULT')
+        if event.value == 'PRESS' and event.type in {'ESC','RIGHTMOUSE'}:
+            s.dice_x,s.dice_y,s.dice_z,s.dice_count_x,s.dice_count_y,s.dice_count_z=self.original; context.workspace.status_text_set(None); return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+
 class KORO_OT_edit_cutter(Operator):
     bl_idname = "koro.edit_cutter"
     bl_label = "Edit Cutter Shape"
@@ -589,7 +838,7 @@ class KORO_OT_dice(Operator):
 
 
 class KORO_MT_hardops_q(Menu):
-    bl_label = "KORO HardOps v0.8"
+    bl_label = "KORO HardOps v0.9"
     bl_idname = "KORO_MT_hardops_q"
 
     def draw(self, context):
@@ -606,7 +855,8 @@ class KORO_MT_hardops_q(Menu):
         op.operation = 'DIFFERENCE'
         col.operator("koro.repeat_last_cutter", text="Repeat Last Cutter", icon='DUPLICATE')
         col.operator("koro.stamp_cutter", text="Stamp Last Cutter", icon='BRUSH_DATA')
-        col.operator("koro.edit_cutter", text="Edit Live Cutter", icon='EDITMODE_HLT')
+        col.operator("koro.edit_cutter", text="Edit Mesh Cutter", icon='EDITMODE_HLT')
+        col.operator("koro.parametric_cutter_edit", text="Parametric Edit", icon='MODIFIER')
 
         layout.separator()
         layout.label(text="Boolean")
@@ -621,8 +871,10 @@ class KORO_MT_hardops_q(Menu):
 
         layout.separator()
         layout.label(text="Modeling")
-        layout.operator("koro.dice", text="Dice", icon='MOD_WIREFRAME')
-        layout.operator("koro.quick_array", text="Quick Array", icon='MOD_ARRAY')
+        layout.operator("koro.dice_modal", text="Dice Modal", icon='MOD_WIREFRAME')
+        layout.operator("koro.array_modal", text="Array Modal", icon='MOD_ARRAY')
+        layout.operator("koro.dice", text="Dice Apply", icon='MOD_WIREFRAME')
+        layout.operator("koro.quick_array", text="Quick Array Apply", icon='MOD_ARRAY')
         layout.operator("koro.apply_cutter_preset", text="Apply Cutter Preset", icon='PRESET')
 
         layout.separator()
