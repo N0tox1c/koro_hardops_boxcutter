@@ -19,8 +19,21 @@ jobs:
       - name: Reconstruct and verify v0.9.0
         shell: bash
         run: |
-          cat .koro_upload_v09/part_* | tr -d '\r\n' | base64 -d > /tmp/koro_hardops_boxcutter-0.9.0.zip
-          echo "164d03bcfa29d855a973151ff568580b601ade1ae2b553daa4d85ed9abe485d9  /tmp/koro_hardops_boxcutter-0.9.0.zip" | sha256sum -c -
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib
+          parts = sorted(Path('.koro_upload_v09').glob('part_*'))
+          if len(parts) != 4:
+              raise SystemExit(f'Expected 4 parts, found {len(parts)}')
+          data = b''.join(base64.b64decode(p.read_text(encoding='utf-8').strip(), validate=True) for p in parts)
+          out = Path('/tmp/koro_hardops_boxcutter-0.9.0.zip')
+          out.write_bytes(data)
+          digest = hashlib.sha256(data).hexdigest()
+          expected = '164d03bcfa29d855a973151ff568580b601ade1ae2b553daa4d85ed9abe485d9'
+          print('v0.9.0 SHA-256:', digest)
+          if digest != expected:
+              raise SystemExit(f'v0.9.0 SHA mismatch: {digest}')
+          PY
           echo "cf38e7f11fdaedf22067f5520348549ae26f75924b6042e2e71771a7713c9f33  releases/koro_hardops_boxcutter-0.8.0.zip" | sha256sum -c -
 
       - name: Update main to v0.9.0 and clean staging files
