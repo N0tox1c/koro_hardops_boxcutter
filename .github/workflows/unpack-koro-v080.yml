@@ -1,0 +1,74 @@
+name: Import KORO v0.8.0
+
+on:
+  push:
+    paths:
+      - '.koro_upload/**'
+      - '.github/workflows/unpack-koro-v080.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  import-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct, verify and unpack v0.8.0
+        shell: bash
+        run: |
+          if [ ! -d .koro_upload ]; then
+            echo "No staged KORO upload found; nothing to do."
+            exit 0
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, zipfile, shutil
+
+          expected = 'cf38e7f11fdaedf22067f5520348549ae26f75924b6042e2e71771a7713c9f33'
+          parts = sorted(Path('.koro_upload').glob('part_*'))
+          if len(parts) != 9:
+              raise SystemExit(f'Expected 9 upload parts, found {len(parts)}')
+
+          encoded = ''.join(p.read_text(encoding='utf-8') for p in parts)
+          data = base64.b64decode(encoded, validate=True)
+          digest = hashlib.sha256(data).hexdigest()
+          print('ZIP SHA-256:', digest)
+          if digest != expected:
+              raise SystemExit(f'SHA-256 mismatch: expected {expected}, got {digest}')
+
+          release_dir = Path('releases')
+          release_dir.mkdir(exist_ok=True)
+          zip_path = release_dir / 'koro_hardops_boxcutter-0.8.0.zip'
+          zip_path.write_bytes(data)
+
+          with zipfile.ZipFile(zip_path) as zf:
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f'Corrupt ZIP member: {bad}')
+              zf.extractall('.')
+
+          shutil.rmtree('.koro_upload')
+          PY
+
+      - name: Commit imported source and release ZIP
+        shell: bash
+        run: |
+          if [ -d .koro_upload ]; then
+            echo "Import did not finish; refusing to commit."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Import KORO HardOps BoxCutter v0.8.0 source"
+          git push
