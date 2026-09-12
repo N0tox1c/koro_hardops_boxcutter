@@ -1,4 +1,4 @@
-name: Publish KORO Releases
+name: Publish KORO Release
 
 on:
   push:
@@ -16,53 +16,43 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify current source
+      - name: Verify v0.10.0 source
         shell: bash
         run: |
-          grep -q 'version = "0.9.0"' blender_manifest.toml
+          grep -q 'version = "0.10.0"' blender_manifest.toml
           python -m py_compile __init__.py properties.py utils.py operators/*.py ui/*.py
+          rm -rf __pycache__ operators/__pycache__ ui/__pycache__
 
-      - name: Build installable v0.9.0 ZIP
+      - name: Build installable v0.10.0 ZIP
         shell: bash
         run: |
-          rm -f /tmp/koro_hardops_boxcutter-0.9.0.zip
-          zip -q -r /tmp/koro_hardops_boxcutter-0.9.0.zip \
+          rm -f /tmp/koro_hardops_boxcutter-0.10.0.zip
+          zip -q -r /tmp/koro_hardops_boxcutter-0.10.0.zip \
             README.md __init__.py blender_manifest.toml properties.py utils.py operators ui \
             -x '*/__pycache__/*' '*.pyc'
-          unzip -t /tmp/koro_hardops_boxcutter-0.9.0.zip
-          sha256sum /tmp/koro_hardops_boxcutter-0.9.0.zip
+          unzip -t /tmp/koro_hardops_boxcutter-0.10.0.zip
+          sha256sum /tmp/koro_hardops_boxcutter-0.10.0.zip | tee /tmp/koro-v010.sha256
 
-      - name: Verify v0.8.0 archive
-        shell: bash
-        run: |
-          test -f releases/koro_hardops_boxcutter-0.8.0.zip
-          echo "cf38e7f11fdaedf22067f5520348549ae26f75924b6042e2e71771a7713c9f33  releases/koro_hardops_boxcutter-0.8.0.zip" | sha256sum -c -
-          unzip -t releases/koro_hardops_boxcutter-0.8.0.zip
-
-      - name: Publish v0.8.0
+      - name: Publish v0.10.0
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh release view v0.8.0 >/dev/null 2>&1; then
-            gh release upload v0.8.0 releases/koro_hardops_boxcutter-0.8.0.zip --clobber
-          else
-            gh release create v0.8.0 releases/koro_hardops_boxcutter-0.8.0.zip \
-              --target main \
-              --title "KORO HardOps + BoxCutter v0.8.0" \
-              --notes "Blender 5.2+ installable extension ZIP."
-          fi
+          DIGEST=$(cut -d' ' -f1 /tmp/koro-v010.sha256)
+          NOTES=$(cat <<EOF
+          Blender 5.2+ installable extension ZIP.
 
-      - name: Publish v0.9.0
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          if gh release view v0.9.0 >/dev/null 2>&1; then
-            gh release upload v0.9.0 /tmp/koro_hardops_boxcutter-0.9.0.zip --clobber
+          v0.10.0 adds Profile Edit Modal, expanded parametric editing, 8 scene-local user cutter presets, and batch modifier workflow across selected meshes.
+
+          SHA-256: $DIGEST
+          EOF
+          )
+          if gh release view v0.10.0 >/dev/null 2>&1; then
+            gh release upload v0.10.0 /tmp/koro_hardops_boxcutter-0.10.0.zip --clobber
+            gh release edit v0.10.0 --title "KORO HardOps + BoxCutter v0.10.0" --notes "$NOTES"
           else
-            gh release create v0.9.0 /tmp/koro_hardops_boxcutter-0.9.0.zip \
+            gh release create v0.10.0 /tmp/koro_hardops_boxcutter-0.10.0.zip \
               --target main \
-              --title "KORO HardOps + BoxCutter v0.9.0" \
-              --notes "Blender 5.2+ installable extension ZIP. Adds parametric edit, drag handles, real wedge, Array Modal and Dice Modal."
+              --title "KORO HardOps + BoxCutter v0.10.0" \
+              --notes "$NOTES"
           fi
