@@ -1,5 +1,5 @@
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, FloatVectorProperty, PointerProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, FloatVectorProperty, PointerProperty, StringProperty
 
 
 class KORO_HS_Settings(bpy.types.PropertyGroup):
@@ -264,4 +264,43 @@ class KORO_HS_Settings(bpy.types.PropertyGroup):
     dice_count_y: IntProperty(name="Y Cuts", default=3, min=1, max=128)
     dice_count_z: IntProperty(name="Z Cuts", default=3, min=1, max=128)
     dice_merge_distance: FloatProperty(name="Dice Epsilon", default=0.00001, min=0.0000001, max=0.01, unit='LENGTH')
+
+
+    user_preset_slot: IntProperty(
+        name="Preset Slot",
+        description="Scene-local custom cutter preset slot",
+        default=1, min=1, max=8,
+    )
+    user_preset_name: StringProperty(
+        name="Preset Name",
+        description="Optional label stored with the custom cutter preset",
+        default="", maxlen=64,
+    )
+
+    batch_modifier_filter: EnumProperty(
+        name="Modifier Filter",
+        items=(
+            ('KORO', "KORO", "Only KORO-generated modifiers"),
+            ('BOOLEAN', "Boolean", "All Boolean modifiers"),
+            ('BEVEL', "Bevel", "All Bevel modifiers"),
+            ('ARRAY', "Array", "All Array modifiers"),
+            ('MIRROR', "Mirror", "All Mirror modifiers"),
+            ('SOLIDIFY', "Solidify", "All Solidify modifiers"),
+            ('ALL', "All", "All modifiers"),
+        ),
+        default='KORO',
+    )
+    batch_modifier_action: EnumProperty(
+        name="Batch Action",
+        items=(
+            ('TOGGLE_VIEW', "Toggle View", "Toggle viewport visibility"),
+            ('ENABLE_VIEW', "Enable View", "Enable viewport visibility"),
+            ('DISABLE_VIEW', "Disable View", "Disable viewport visibility"),
+            ('TOGGLE_RENDER', "Toggle Render", "Toggle render visibility"),
+            ('APPLY', "Apply", "Apply matching modifiers"),
+            ('REMOVE', "Remove", "Remove matching modifiers"),
+            ('SORT', "Sort", "Sort the KORO hard-surface stack"),
+        ),
+        default='TOGGLE_VIEW',
+    )
 

@@ -1,9 +1,13 @@
 import math
+import json
 import bpy
 import blf
 import bmesh
+import gpu
 from mathutils import Vector, Matrix
 from bpy.props import EnumProperty
+from bpy_extras import view3d_utils
+from gpu_extras.batch import batch_for_shader
 from bpy.types import Operator, Menu
 from .. import utils
 
@@ -259,7 +263,7 @@ class KORO_OT_parametric_cutter_edit(Operator):
     start_value = 0.0
     original = None
 
-    PARAMS = ('DEPTH', 'INSET', 'BEVEL', 'OFFSET', 'TAPER', 'WEDGE', 'ARRAY_COUNT', 'ARRAY_GAP')
+    PARAMS = ('DEPTH', 'INSET', 'BEVEL', 'OFFSET', 'TAPER', 'WEDGE', 'ARRAY_COUNT', 'ARRAY_GAP', 'RADIAL_SWEEP')
 
     @classmethod
     def poll(cls, context):
@@ -287,6 +291,7 @@ class KORO_OT_parametric_cutter_edit(Operator):
         if self.parameter == 'TAPER': return float(c.get('koro_taper_factor', 0.0))
         if self.parameter == 'WEDGE': return float(c.get('koro_wedge_factor', 0.0))
         if self.parameter == 'ARRAY_COUNT': return float(c.get('koro_array_count', 2))
+        if self.parameter == 'RADIAL_SWEEP': return float(c.get('koro_radial_sweep', math.tau))
         return float(c.get('koro_array_gap', 0.05))
 
     def _set_value(self, value):
@@ -307,12 +312,14 @@ class KORO_OT_parametric_cutter_edit(Operator):
         elif self.parameter == 'ARRAY_GAP':
             c['koro_array_gap'] = float(value)
             if c.get('koro_array_mode', 'OFF') == 'OFF': c['koro_array_mode'] = 'LINEAR'
+        elif self.parameter == 'RADIAL_SWEEP':
+            c['koro_array_mode'] = 'RADIAL'; c['koro_radial_sweep'] = max(-math.tau, min(math.tau, float(value)))
 
     def _snapshot(self):
         keys = [
             'koro_depth','koro_inset_enabled','koro_inset_amount','koro_cutter_bevel_enabled','koro_cutter_bevel_width',
             'koro_offset_amount','koro_taper_enabled','koro_taper_factor','koro_wedge_enabled','koro_wedge_factor','koro_wedge_axis',
-            'koro_array_mode','koro_array_count','koro_array_gap'
+            'koro_array_mode','koro_array_count','koro_array_gap','koro_radial_sweep','koro_extrude_direction','koro_through'
         ]
         return {k: self.cutter.get(k, None) for k in keys}
 
@@ -336,11 +343,11 @@ class KORO_OT_parametric_cutter_edit(Operator):
             blf.draw(font, text); y -= 20
         line('KORO PARAMETRIC EDIT v0.9', 18)
         line(f'{self.cutter.name}  |  {self.parameter}: {self._value():.5g}')
-        line('Mouse = adjust | Wheel = fine | Tab = next parameter | D/I/B/O/T/W/A/G = direct')
-        line('X/Y = Wedge axis | LMB = re-anchor | Enter = finish | Esc/RMB = rollback', 12)
+        line('Mouse = adjust | Wheel = fine | Tab next | D/I/B/O/T/W/A/G/R direct')
+        line('F extrude direction | L through | X/Y wedge axis | Enter finish | Esc rollback', 12)
 
     def _select_param(self, event_type):
-        mapping = {'D':'DEPTH','I':'INSET','B':'BEVEL','O':'OFFSET','T':'TAPER','W':'WEDGE','A':'ARRAY_COUNT','G':'ARRAY_GAP'}
+        mapping = {'D':'DEPTH','I':'INSET','B':'BEVEL','O':'OFFSET','T':'TAPER','W':'WEDGE','A':'ARRAY_COUNT','G':'ARRAY_GAP','R':'RADIAL_SWEEP'}
         if event_type in mapping:
             self.parameter = mapping[event_type]
             return True
@@ -388,6 +395,13 @@ class KORO_OT_parametric_cutter_edit(Operator):
             self._reanchor(event); return {'RUNNING_MODAL'}
         if self.parameter == 'WEDGE' and event.value == 'PRESS' and event.type in {'X','Y'}:
             self.cutter['koro_wedge_axis'] = event.type; utils.rebuild_cutter_from_metadata(context, self.cutter, self.target); return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and event.type == 'F':
+            order=['NEGATIVE','POSITIVE','BOTH']; current=str(self.cutter.get('koro_extrude_direction','NEGATIVE'))
+            self.cutter['koro_extrude_direction']=order[(order.index(current) + 1) % len(order)] if current in order else 'NEGATIVE'
+            utils.rebuild_cutter_from_metadata(context,self.cutter,self.target); return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and event.type == 'L':
+            self.cutter['koro_through']=not bool(self.cutter.get('koro_through',False))
+            utils.rebuild_cutter_from_metadata(context,self.cutter,self.target); return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             self._reanchor(event); return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
@@ -397,12 +411,15 @@ class KORO_OT_parametric_cutter_edit(Operator):
                 step = 0.001 * scale
             elif self.parameter == 'ARRAY_COUNT':
                 step = 0.05
+            elif self.parameter == 'RADIAL_SWEEP':
+                step = 0.01
             else:
                 step = 0.01
             value = self.start_value + dx * step
             if event.ctrl:
                 if self.parameter == 'ARRAY_COUNT': value = round(value)
                 elif self.parameter in {'TAPER','WEDGE'}: value = round(value * 10.0) / 10.0
+                elif self.parameter == 'RADIAL_SWEEP': value = round(value / math.radians(15.0)) * math.radians(15.0)
                 else:
                     grid = max(context.scene.koro_hs.grid_size * 0.1, 0.0001); value = round(value / grid) * grid
             self._set_value(value); utils.rebuild_cutter_from_metadata(context, self.cutter, self.target); return {'RUNNING_MODAL'}
@@ -410,9 +427,264 @@ class KORO_OT_parametric_cutter_edit(Operator):
             direction = 1 if event.type == 'WHEELUPMOUSE' else -1
             if self.parameter == 'ARRAY_COUNT': delta = direction
             elif self.parameter in {'TAPER','WEDGE'}: delta = direction * 0.05
+            elif self.parameter == 'RADIAL_SWEEP': delta = direction * math.radians(5.0)
             else: delta = direction * max(context.scene.koro_hs.grid_size * 0.05, 0.0001)
             self._set_value(self._value() + delta); utils.rebuild_cutter_from_metadata(context, self.cutter, self.target); self._reanchor(event); return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
+
+
+class KORO_OT_profile_edit_modal(Operator):
+    bl_idname = "koro.profile_edit_modal"
+    bl_label = "Profile Edit Modal"
+    bl_description = "Drag, insert, and delete stored cutter profile vertices directly in the 3D View"
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
+
+    _handle = None
+    cutter = None
+    target = None
+    points = None
+    original = None
+    active_index = 0
+    hover_index = -1
+    dragging = False
+    plane_co = None
+    plane_no = None
+    plane_z = 0.0
+
+    @classmethod
+    def poll(cls, context):
+        return context.area and context.area.type == 'VIEW_3D' and context.mode == 'OBJECT' and context.active_object is not None
+
+    def _find_cutter(self, context):
+        active=context.active_object
+        if active and active.type == 'MESH' and active.get('koro_cutter', False):
+            return active
+        if active and active.type == 'MESH':
+            for mod in reversed(list(active.modifiers)):
+                if mod.type == 'BOOLEAN' and getattr(mod,'operand_type','OBJECT') == 'OBJECT':
+                    obj=getattr(mod,'object',None)
+                    if obj and obj.type == 'MESH' and obj.get('koro_cutter',False):
+                        return obj
+        return utils.last_cutter(context.scene)
+
+    def _screen_points(self, context):
+        result=[]
+        if not self.cutter:
+            return result
+        for i,(x,y) in enumerate(self.points):
+            world=self.cutter.matrix_world @ Vector((x,y,self.plane_z))
+            p=view3d_utils.location_3d_to_region_2d(context.region,context.region_data,world)
+            if p is not None:
+                result.append((i,p,world))
+        return result
+
+    def _pick(self, context, event):
+        best=(-1,1e30)
+        for i,p,_world in self._screen_points(context):
+            d=math.hypot(p.x-event.mouse_region_x,p.y-event.mouse_region_y)
+            if d < best[1]: best=(i,d)
+        radius=max(float(context.scene.koro_hs.handle_pick_radius),10.0)
+        return best[0] if best[1] <= radius else -1
+
+    def _draw(self, context):
+        screen=self._screen_points(context)
+        if not screen:
+            return
+        coords=[(p.x,p.y) for _i,p,_w in screen]
+        if len(coords) >= 2:
+            line_coords=coords+[coords[0]]
+            shader=gpu.shader.from_builtin('UNIFORM_COLOR')
+            batch=batch_for_shader(shader,'LINE_STRIP',{'pos':line_coords})
+            shader.bind(); shader.uniform_float('color',(0.75,0.75,0.75,0.85)); batch.draw(shader)
+        shader=gpu.shader.from_builtin('POINT_UNIFORM_COLOR')
+        for i,p,_w in screen:
+            size=float(context.scene.koro_hs.handle_size)+(5.0 if i in {self.active_index,self.hover_index} else 0.0)
+            color=(1.0,0.75,0.18,1.0) if i == self.active_index else ((0.35,0.9,1.0,1.0) if i == self.hover_index else (0.85,0.85,0.85,0.95))
+            batch=batch_for_shader(shader,'POINTS',{'pos':[(p.x,p.y)]})
+            shader.bind(); shader.uniform_float('color',color); shader.uniform_float('size',size); batch.draw(shader)
+        x,y=28,context.region.height-42; font=0
+        for text,size in [
+            ('KORO PROFILE EDIT v0.10',18),
+            (f'{self.cutter.name} | Vertex {self.active_index+1}/{len(self.points)}',14),
+            ('LMB drag | Ctrl grid snap | Tab next | E insert after | X delete',12),
+            ('Enter save | Esc/RMB rollback',12),
+        ]:
+            blf.position(font,x,y,0)
+            try: blf.size(font,size)
+            except TypeError: blf.size(font,size,72)
+            blf.draw(font,text); y-=20
+
+    def _rebuild(self, context, candidate):
+        if len(candidate) < 3 or not utils.polygon_is_simple(candidate):
+            return False
+        self.points=[(float(x),float(y)) for x,y in candidate]
+        if not utils.store_profile_points(self.cutter,self.points):
+            return False
+        return utils.rebuild_cutter_from_metadata(context,self.cutter,self.target)
+
+    def invoke(self, context, event):
+        self.cutter=self._find_cutter(context)
+        if self.cutter is None:
+            self.report({'WARNING'},'No KORO cutter found'); return {'CANCELLED'}
+        self.target=utils.find_target_for_cutter(context.scene,self.cutter)
+        if not utils.ensure_parametric_metadata(context,self.cutter,self.target):
+            self.report({'WARNING'},'Cutter has no recoverable parametric profile'); return {'CANCELLED'}
+        self.points=list(utils.cutter_profile_points(self.cutter)); self.original=list(self.points)
+        self.active_index=0; self.hover_index=-1; self.dragging=False
+        self.plane_co,self.plane_no,self.plane_z=utils.profile_plane_world(context,self.cutter,self.target)
+        self.cutter.hide_set(False); self.cutter.hide_viewport=False
+        self._handle=bpy.types.SpaceView3D.draw_handler_add(self._draw,(context,),'WINDOW','POST_PIXEL')
+        context.window_manager.modal_handler_add(self); context.window.cursor_modal_set('CROSSHAIR')
+        return {'RUNNING_MODAL'}
+
+    def _cleanup(self, context):
+        if self._handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle,'WINDOW'); self._handle=None
+        try: context.window.cursor_modal_restore()
+        except Exception: pass
+        if context.area: context.area.tag_redraw()
+
+    def modal(self, context, event):
+        if context.area: context.area.tag_redraw()
+        if event.type in {'ESC','RIGHTMOUSE'} and event.value == 'PRESS':
+            utils.store_profile_points(self.cutter,self.original); utils.rebuild_cutter_from_metadata(context,self.cutter,self.target); self._cleanup(context); return {'CANCELLED'}
+        if event.type in {'RET','NUMPAD_ENTER'} and event.value == 'PRESS':
+            self._cleanup(context); self.report({'INFO'},f'Profile saved: {self.cutter.name}'); return {'FINISHED'}
+        if event.type == 'TAB' and event.value == 'PRESS':
+            self.active_index=(self.active_index+1)%len(self.points); return {'RUNNING_MODAL'}
+        if event.type == 'E' and event.value == 'PRESS':
+            i=self.active_index; j=(i+1)%len(self.points); a=self.points[i]; b=self.points[j]
+            candidate=list(self.points); candidate.insert(j,((a[0]+b[0])*0.5,(a[1]+b[1])*0.5))
+            if self._rebuild(context,candidate): self.active_index=j
+            return {'RUNNING_MODAL'}
+        if event.type == 'X' and event.value == 'PRESS':
+            if len(self.points) <= 3:
+                self.report({'INFO'},'A profile needs at least 3 vertices'); return {'RUNNING_MODAL'}
+            candidate=list(self.points); candidate.pop(self.active_index)
+            if self._rebuild(context,candidate): self.active_index=min(self.active_index,len(self.points)-1)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            idx=self._pick(context,event)
+            if idx >= 0: self.active_index=idx; self.dragging=True
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            self.dragging=False; return {'RUNNING_MODAL'}
+        if event.type == 'MOUSEMOVE':
+            self.hover_index=self._pick(context,event)
+            if self.dragging:
+                world=utils.plane_point(context,(event.mouse_region_x,event.mouse_region_y),self.plane_co,self.plane_no)
+                if world is not None:
+                    local=self.cutter.matrix_world.inverted() @ world
+                    x,y=float(local.x),float(local.y)
+                    if event.ctrl:
+                        grid=max(float(context.scene.koro_hs.grid_size),1e-6); x=round(x/grid)*grid; y=round(y/grid)*grid
+                    candidate=list(self.points); candidate[self.active_index]=(x,y); self._rebuild(context,candidate)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+
+_PRESET_FIELDS=(
+    'operation','solver','default_depth','surface_offset','draw_origin','orientation','extrude_direction',
+    'through_cut','through_margin','quick_execute','offset_amount','inset_enabled','inset_amount',
+    'cutter_bevel','cutter_bevel_width','cutter_bevel_segments','array_mode','array_count','array_gap',
+    'radial_sweep','taper_enabled','taper_factor','wedge_enabled','wedge_factor','wedge_axis',
+    'mirror_mode','mirror_origin','live_solidify','solidify_even','auto_bevel','bevel_width','bevel_segments',
+    'weighted_normals'
+)
+
+
+class KORO_OT_save_user_preset(Operator):
+    bl_idname='koro.save_user_preset'
+    bl_label='Save User Preset'
+    bl_description='Save current cutter settings into one of eight scene-local preset slots'
+    bl_options={'REGISTER','UNDO'}
+
+    def execute(self, context):
+        s=context.scene.koro_hs; slot=int(s.user_preset_slot)
+        data={'version':1,'name':s.user_preset_name.strip() or f'Preset {slot}','settings':{}}
+        for key in _PRESET_FIELDS:
+            value=getattr(s,key)
+            if hasattr(value,'to_list'): value=value.to_list()
+            elif isinstance(value,(tuple,list)): value=list(value)
+            data['settings'][key]=value
+        context.scene[f'koro_user_preset_{slot}']=json.dumps(data,separators=(',',':'))
+        self.report({'INFO'},f'Saved {data["name"]} to slot {slot}'); return {'FINISHED'}
+
+
+class KORO_OT_load_user_preset(Operator):
+    bl_idname='koro.load_user_preset'
+    bl_label='Load User Preset'
+    bl_options={'REGISTER','UNDO'}
+
+    def execute(self, context):
+        s=context.scene.koro_hs; slot=int(s.user_preset_slot); raw=context.scene.get(f'koro_user_preset_{slot}','')
+        if not raw:
+            self.report({'WARNING'},f'Preset slot {slot} is empty'); return {'CANCELLED'}
+        try: data=json.loads(str(raw))
+        except Exception as exc:
+            self.report({'WARNING'},f'Invalid preset data: {exc}'); return {'CANCELLED'}
+        changed=0
+        for key,value in data.get('settings',{}).items():
+            if not hasattr(s,key): continue
+            try: setattr(s,key,value); changed+=1
+            except Exception: pass
+        s.user_preset_name=str(data.get('name',f'Preset {slot}'))
+        self.report({'INFO'},f'Loaded {s.user_preset_name} ({changed} settings)'); return {'FINISHED'}
+
+
+class KORO_OT_delete_user_preset(Operator):
+    bl_idname='koro.delete_user_preset'
+    bl_label='Delete User Preset'
+    bl_options={'REGISTER','UNDO'}
+
+    def execute(self, context):
+        slot=int(context.scene.koro_hs.user_preset_slot); key=f'koro_user_preset_{slot}'
+        if key in context.scene: del context.scene[key]
+        self.report({'INFO'},f'Cleared preset slot {slot}'); return {'FINISHED'}
+
+
+class KORO_OT_batch_modifier_action(Operator):
+    bl_idname='koro.batch_modifier_action'
+    bl_label='Batch Modifier Action'
+    bl_description='Run one modifier-stack action across all selected mesh objects'
+    bl_options={'REGISTER','UNDO'}
+
+    def _matches(self, mod, filter_name):
+        if filter_name == 'ALL': return True
+        if filter_name == 'KORO': return mod.name.startswith('KORO_') or mod.name.startswith(utils.BOOL_PREFIX)
+        return mod.type == filter_name
+
+    def execute(self, context):
+        s=context.scene.koro_hs; objects=[o for o in context.selected_objects if o.type == 'MESH']
+        if not objects:
+            self.report({'WARNING'},'Select at least one mesh object'); return {'CANCELLED'}
+        if s.batch_modifier_action == 'SORT':
+            for obj in objects: utils.sort_target_modifiers(obj)
+            self.report({'INFO'},f'Sorted {len(objects)} object(s)'); return {'FINISHED'}
+        pairs=[(obj,mod) for obj in objects for mod in list(obj.modifiers) if self._matches(mod,s.batch_modifier_filter)]
+        if not pairs:
+            self.report({'INFO'},'No matching modifiers'); return {'FINISHED'}
+        action=s.batch_modifier_action
+        if action == 'TOGGLE_VIEW':
+            state=not any(mod.show_viewport for _obj,mod in pairs)
+            for _obj,mod in pairs: mod.show_viewport=state
+        elif action == 'ENABLE_VIEW':
+            for _obj,mod in pairs: mod.show_viewport=True
+        elif action == 'DISABLE_VIEW':
+            for _obj,mod in pairs: mod.show_viewport=False
+        elif action == 'TOGGLE_RENDER':
+            state=not any(mod.show_render for _obj,mod in pairs)
+            for _obj,mod in pairs: mod.show_render=state
+        elif action == 'REMOVE':
+            for obj,mod in pairs:
+                if obj.modifiers.get(mod.name) is not None: obj.modifiers.remove(mod)
+        elif action == 'APPLY':
+            applied=0
+            for obj,mod in pairs:
+                try: utils.apply_modifier(context,obj,mod); applied+=1
+                except Exception: pass
+            self.report({'INFO'},f'Applied {applied}/{len(pairs)} modifier(s)'); return {'FINISHED'}
+        self.report({'INFO'},f'{action}: {len(pairs)} modifier(s) on {len(objects)} object(s)'); return {'FINISHED'}
 
 
 class KORO_OT_array_modal(Operator):
@@ -838,7 +1110,7 @@ class KORO_OT_dice(Operator):
 
 
 class KORO_MT_hardops_q(Menu):
-    bl_label = "KORO HardOps v0.9"
+    bl_label = "KORO HardOps v0.10"
     bl_idname = "KORO_MT_hardops_q"
 
     def draw(self, context):
@@ -857,6 +1129,7 @@ class KORO_MT_hardops_q(Menu):
         col.operator("koro.stamp_cutter", text="Stamp Last Cutter", icon='BRUSH_DATA')
         col.operator("koro.edit_cutter", text="Edit Mesh Cutter", icon='EDITMODE_HLT')
         col.operator("koro.parametric_cutter_edit", text="Parametric Edit", icon='MODIFIER')
+        col.operator("koro.profile_edit_modal", text="Profile Edit Modal", icon='EDITMODE_HLT')
 
         layout.separator()
         layout.label(text="Boolean")
@@ -876,6 +1149,7 @@ class KORO_MT_hardops_q(Menu):
         layout.operator("koro.dice", text="Dice Apply", icon='MOD_WIREFRAME')
         layout.operator("koro.quick_array", text="Quick Array Apply", icon='MOD_ARRAY')
         layout.operator("koro.apply_cutter_preset", text="Apply Cutter Preset", icon='PRESET')
+        layout.operator("koro.batch_modifier_action", text="Batch Modifier Action", icon='MODIFIER')
 
         layout.separator()
         layout.label(text="Finish")
@@ -1069,7 +1343,7 @@ class KORO_OT_modifier_scroll(Operator):
             blf.draw(font, text)
             y -= 20
 
-        line("KORO MODIFIER SCROLL v0.8", 18)
+        line("KORO MODIFIER SCROLL v0.10", 18)
         mod = mods[self.index]
         line(f"{self.index + 1}/{len(mods)}  {mod.name}  [{mod.type}]", 14)
         line(f"Viewport {'ON' if mod.show_viewport else 'OFF'} | Render {'ON' if mod.show_render else 'OFF'} | Edit {'ON' if mod.show_in_editmode else 'OFF'}", 12)

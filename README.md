@@ -1,4 +1,4 @@
-# KORO HardOps + BoxCutter Core v0.9.0
+# KORO HardOps + BoxCutter Core v0.10.0
 
 Independent hard-surface workflow extension for **Blender 5.2+** inspired by modern Boolean-modeling interaction patterns. It contains no Hard Ops / Boxcutter source code or proprietary assets.
 
@@ -7,9 +7,60 @@ Independent hard-surface workflow extension for **Blender 5.2+** inspired by mod
 1. Open Blender 5.2 or newer.
 2. Go to **Edit > Preferences > Extensions**.
 3. Choose **Install from Disk**.
-4. Select `koro_hardops_boxcutter-0.9.0.zip`.
+4. Select `koro_hardops_boxcutter-0.10.0.zip`.
 5. Enable **KORO HardOps BoxCutter** if needed.
 6. Use **Q** in Object Mode or **N > KORO HS**.
+
+
+## v0.10 highlights
+
+### Profile Edit Modal
+
+**Q > Profile Edit Modal** re-opens the stored 2D cutter profile and edits it directly in the viewport without entering Blender mesh Edit Mode.
+
+- click a profile point and drag it;
+- hold `Ctrl` while dragging to snap local X/Y to the configured KORO grid;
+- `Tab` selects the next profile vertex;
+- `E` inserts a new midpoint after the active profile vertex;
+- `X` deletes the active vertex while preserving the 3-point minimum;
+- self-intersecting / degenerate profile edits are rejected before rebuilding the Boolean cutter;
+- `Enter` saves and `Esc/RMB` restores the complete original profile.
+
+The editor works on Box, Circle and NGon cutters that contain v0.9+ profile metadata, and on recoverable migrated v0.8 cutters.
+
+### Expanded Parametric Edit
+
+The existing parametric editor now also supports:
+
+- `R` — radial-array sweep;
+- `F` — cycle extrusion direction (`Into / Outward / Both`);
+- `L` — toggle Through mode;
+- 15-degree Ctrl snapping for radial sweep.
+
+This allows an already-confirmed cutter to switch extrusion behavior or become a through/radial cut without recreating it.
+
+### User Preset Slots
+
+Eight **scene-local user preset slots** are available in the KORO sidebar. Each slot stores the active cutter workflow configuration, including Boolean operation/solver, depth/offset, inset/bevel, Array/Radial, Taper/Wedge, Mirror/Solidify and target finishing options.
+
+- **Save** writes the current configuration to the selected slot;
+- **Load** restores all supported settings;
+- **Clear** removes the slot;
+- an optional preset name is stored with the slot.
+
+Preset data is stored in the `.blend` scene rather than in external files, so project-specific cutter presets travel with the Blender file.
+
+### Batch Modifier Workflow
+
+A new batch operator runs modifier-stack operations across all selected mesh objects. Filters include **KORO / Boolean / Bevel / Array / Mirror / Solidify / All** and actions include:
+
+- Toggle / Enable / Disable viewport visibility;
+- Toggle render visibility;
+- Apply;
+- Remove;
+- Sort KORO hard-surface stacks.
+
+This complements the single-object Modifier Scroll modal for larger hard-surface assemblies.
 
 
 ## v0.9 highlights
@@ -135,7 +186,7 @@ This adds topology cuts; it does not merely display guide planes.
 
 This is separate from the specialized BoxCutter live Array mode.
 
-## Q menu v0.8
+## Q menu v0.10
 
 The Q menu now includes:
 
@@ -144,11 +195,13 @@ The Q menu now includes:
 - Repeat Last Cutter;
 - Stamp Last Cutter;
 - Edit Live Cutter;
+- Parametric Edit and Profile Edit Modal;
 - selected-object Difference / Union / Intersect;
 - Collection Difference;
 - Dice;
 - Quick Array;
 - Apply Cutter Preset;
+- Batch Modifier Action;
 - Sharpen / Smart Bevel / Weighted Normals;
 - Modifier Scroll / Sort / Toggle / Clean / Apply / Smart Apply.
 
