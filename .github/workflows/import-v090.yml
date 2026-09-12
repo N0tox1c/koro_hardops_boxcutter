@@ -38,8 +38,17 @@ jobs:
               print('Waiting for upload parts:', ', '.join(missing))
               raise SystemExit(0)
 
+          # part_00a lost exactly one byte in the connector payload. Its Git blob
+          # matches the local segment with the character 'B' deleted at offset 1387.
+          # Repair that known transfer defect before the full cryptographic check.
+          first = (upload / 'part_00a').read_text(encoding='utf-8')
+          if len(first) == 1999:
+              first = first[:1387] + 'B' + first[1387:]
+          if len(first) != 2000:
+              raise SystemExit(f'Unexpected part_00a length: {len(first)}')
+
+          encoded = first + ''.join((upload / name).read_text(encoding='utf-8') for name in names[1:])
           expected = '164d03bcfa29d855a973151ff568580b601ade1ae2b553daa4d85ed9abe485d9'
-          encoded = ''.join((upload / name).read_text(encoding='utf-8') for name in names)
           data = base64.b64decode(encoded, validate=True)
           digest = hashlib.sha256(data).hexdigest()
           print('ZIP SHA-256:', digest)
