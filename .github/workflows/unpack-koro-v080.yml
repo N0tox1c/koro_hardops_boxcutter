@@ -5,6 +5,8 @@ on:
     paths:
       - '.koro_upload/**'
       - '.github/workflows/unpack-koro-v080.yml'
+  issues:
+    types: [opened]
 
 permissions:
   contents: write
