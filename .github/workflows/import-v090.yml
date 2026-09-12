@@ -28,14 +28,18 @@ jobs:
           import base64, hashlib, zipfile, shutil
 
           upload = Path('.koro_upload_v09')
-          parts = sorted(upload.glob('part_*')) if upload.exists() else []
-          expected_parts = 8
-          if len(parts) != expected_parts:
-              print(f'Waiting for upload parts: {len(parts)}/{expected_parts}')
+          names = [
+              'part_00a', 'part_00b', 'part_00c', 'part_00d',
+              'part_01', 'part_02', 'part_03', 'part_04',
+              'part_05', 'part_06', 'part_07',
+          ]
+          missing = [name for name in names if not (upload / name).exists()]
+          if missing:
+              print('Waiting for upload parts:', ', '.join(missing))
               raise SystemExit(0)
 
           expected = '164d03bcfa29d855a973151ff568580b601ade1ae2b553daa4d85ed9abe485d9'
-          encoded = ''.join(p.read_text(encoding='utf-8') for p in parts)
+          encoded = ''.join((upload / name).read_text(encoding='utf-8') for name in names)
           data = base64.b64decode(encoded, validate=True)
           digest = hashlib.sha256(data).hexdigest()
           print('ZIP SHA-256:', digest)
