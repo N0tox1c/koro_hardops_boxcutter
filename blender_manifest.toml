@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+id = "koro_hardops_boxcutter"
+version = "0.8.0"
+name = "KORO HardOps BoxCutter"
+tagline = "Non-destructive hard-surface cutters for Blender 5.2"
+maintainer = "KORO Toolkit"
+type = "add-on"
+blender_version_min = "5.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  ".git/",
+  "*.zip",
+]
