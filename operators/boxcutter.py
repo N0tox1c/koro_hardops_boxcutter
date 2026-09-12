@@ -6,6 +6,7 @@ from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 from bpy.props import EnumProperty
 from bpy.types import Operator
+from bpy_extras import view3d_utils
 from .. import utils
 
 
@@ -97,6 +98,16 @@ class KORO_OT_box_cutter(Operator):
     scale_base_depth = 1.0
     move_start_y = 0
     extrude_direction = 'NEGATIVE'
+    wedge_enabled = False
+    wedge_factor = 0.0
+    wedge_axis = 'X'
+    wedge_start_x = 0
+    wedge_base_factor = 0.0
+    hover_handle = 'NONE'
+    active_handle = 'NONE'
+    handle_start_x = 0
+    handle_start_y = 0
+    handle_base_value = 0.0
 
     @classmethod
     def poll(cls, context):
@@ -193,14 +204,139 @@ class KORO_OT_box_cutter(Operator):
             # HUD remains usable even on GPU backends that reject point drawing.
             pass
 
+    def _parameter_handle_screens(self, context):
+        s = self._settings(context)
+        if not s.show_parameter_handles or not self.cutter or self.phase in {'WAIT', 'NGON'}:
+            return {}
+        points = self._profile_points(include_preview=False)
+        if len(points) < 3 or context.region_data is None:
+            return {}
+        xs = [p[0] for p in points]; ys = [p[1] for p in points]
+        cx = (min(xs) + max(xs)) * 0.5
+        cy = (min(ys) + max(ys)) * 0.5
+        zmin, zmax = self._z_range(context)
+        p0 = Vector((points[0][0], points[0][1], zmax))
+        p1 = Vector((points[1][0], points[1][1], zmax))
+        mid = (p0 + p1) * 0.5
+        local = {
+            'DEPTH': Vector((cx, cy, zmin)),
+            'INSET': mid,
+            'BEVEL': p0,
+        }
+        out = {}
+        for kind, co in local.items():
+            world = self.cutter.matrix_world @ co
+            p2 = view3d_utils.location_3d_to_region_2d(context.region, context.region_data, world)
+            if p2 is not None:
+                out[kind] = (float(p2.x), float(p2.y), world)
+        return out
+
+    def _draw_parameter_handles(self, context):
+        handles = self._parameter_handle_screens(context)
+        if not handles:
+            return
+        s = self._settings(context)
+        colors = {
+            'DEPTH': (0.35, 0.85, 1.0, 1.0),
+            'INSET': (0.95, 0.75, 0.15, 1.0),
+            'BEVEL': (1.0, 0.35, 0.55, 1.0),
+        }
+        try:
+            shader = gpu.shader.from_builtin('POINT_UNIFORM_COLOR')
+            for kind, (x, y, _world) in handles.items():
+                size = float(s.handle_size) + (4.0 if kind in {self.hover_handle, self.active_handle} else 0.0)
+                batch = batch_for_shader(shader, 'POINTS', {'pos': [(x, y, 0.0)]})
+                shader.bind()
+                shader.uniform_float('color', colors[kind])
+                shader.uniform_float('size', size)
+                batch.draw(shader)
+        except Exception:
+            pass
+
+    def _pick_parameter_handle(self, context, event):
+        s = self._settings(context)
+        mx, my = float(event.mouse_region_x), float(event.mouse_region_y)
+        best = ('NONE', float('inf'))
+        for kind, (x, y, _world) in self._parameter_handle_screens(context).items():
+            dist = math.hypot(x - mx, y - my)
+            if dist < best[1]:
+                best = (kind, dist)
+        return best[0] if best[1] <= float(s.handle_pick_radius) else 'NONE'
+
+    def _begin_parameter_handle(self, context, event, kind):
+        if kind not in {'DEPTH', 'INSET', 'BEVEL'} or not self.cutter:
+            return False
+        self.previous_phase = self.phase if self.phase in {'DRAW', 'DEPTH'} else 'DEPTH'
+        self.active_handle = kind
+        self.hover_handle = kind
+        self.handle_start_x = event.mouse_region_x
+        self.handle_start_y = event.mouse_region_y
+        if kind == 'DEPTH':
+            self.phase = 'HANDLE_DEPTH'
+            self.handle_base_value = float(self.depth)
+        elif kind == 'INSET':
+            self.phase = 'HANDLE_INSET'
+            self.inset_enabled = True
+            self.handle_base_value = float(self.inset_amount)
+        else:
+            self.phase = 'HANDLE_BEVEL'
+            self.cutter_bevel_enabled = True
+            self.handle_base_value = float(self._settings(context).cutter_bevel_width)
+        return True
+
+    def _update_parameter_handle(self, context, event):
+        s = self._settings(context)
+        scale_ref = max(self.width, self.height, self.target.dimensions.length * 0.1, 0.01)
+        if self.phase == 'HANDLE_DEPTH':
+            value = self.handle_base_value + (self.handle_start_y - event.mouse_region_y) * 0.002 * scale_ref
+            if event.ctrl:
+                value = self._snap_scalar(context, value, event)
+            self.depth = max(0.0001, value)
+        elif self.phase == 'HANDLE_INSET':
+            value = self.handle_base_value + (event.mouse_region_x - self.handle_start_x) * 0.0015 * scale_ref
+            if event.ctrl:
+                step = max(s.grid_size * 0.1, 0.0001)
+                value = round(value / step) * step
+            self.inset_amount = max(0.00001, value)
+        elif self.phase == 'HANDLE_BEVEL':
+            value = self.handle_base_value + (event.mouse_region_x - self.handle_start_x) * 0.001 * scale_ref
+            if event.ctrl:
+                step = max(s.grid_size * 0.05, 0.0001)
+                value = round(value / step) * step
+            s.cutter_bevel_width = max(0.0, value)
+        self._update_mesh(context)
+
+    def _accept_parameter_handle(self):
+        if self.phase in {'HANDLE_DEPTH', 'HANDLE_INSET', 'HANDLE_BEVEL'}:
+            self.phase = self.previous_phase if self.previous_phase in {'DRAW', 'DEPTH'} else 'DEPTH'
+            self.active_handle = 'NONE'
+            return True
+        return False
+
+    def _cancel_parameter_handle(self, context):
+        if self.phase == 'HANDLE_DEPTH':
+            self.depth = self.handle_base_value
+        elif self.phase == 'HANDLE_INSET':
+            self.inset_amount = self.handle_base_value
+            self.inset_enabled = self.inset_amount > 1e-8
+        elif self.phase == 'HANDLE_BEVEL':
+            self._settings(context).cutter_bevel_width = self.handle_base_value
+            self.cutter_bevel_enabled = self.handle_base_value > 0.0
+        else:
+            return False
+        self._update_mesh(context)
+        self._accept_parameter_handle()
+        return True
+
     def _draw_hud(self, context):
         self._draw_snap_dots(context)
+        self._draw_parameter_handles(context)
         s = self._settings(context)
         if not s.show_hud:
             return
         x = 28
         y = context.region.height - 42
-        self._draw_line("KORO BOXCUTTER v0.8", x, y, 18)
+        self._draw_line("KORO BOXCUTTER v0.9", x, y, 18)
         y -= 24
         self._draw_line(
             f"Shape: {self.shape}   Mode: {self.mode}   Phase: {self.phase}", x, y, 14
@@ -221,12 +357,13 @@ class KORO_OT_box_cutter(Operator):
         self._draw_line(flags, x, y, 12)
         y -= 18
         taper_text = f"{self.taper_factor:.2f}" if self.taper_enabled else "OFF"
+        wedge_text = f"{self.wedge_axis}:{self.wedge_factor:.2f}" if self.wedge_enabled else "OFF"
         flags2 = (
             f"Through {'ON' if self.through_cut else 'OFF'} | Lazor {'ON' if self.lazorcut else 'OFF'} | Snap {self.snap_kind} | "
             f"Solidify {'ON' if self.live_solidify else 'OFF'} | Inset {'ON' if self.inset_enabled else 'OFF'} | "
             f"Bevel {'ON' if self.cutter_bevel_enabled else 'OFF'} | "
             f"Array {self.array_mode}:{s.array_count if self.array_mode != 'OFF' else '-'} | "
-            f"Taper {taper_text} | Offset {self.offset_amount:.4f} | Mirror {self.mirror_mode}@{self.mirror_origin}"
+            f"Taper {taper_text} | Wedge {wedge_text} | Offset {self.offset_amount:.4f} | Mirror {self.mirror_mode}@{self.mirror_origin}"
         )
         self._draw_line(flags2, x, y, 12)
         y -= 24
@@ -251,13 +388,17 @@ class KORO_OT_box_cutter(Operator):
             hint = "Move mouse = inset width | Ctrl = grid step | LMB / Enter / I = accept"
         elif self.phase == 'RADIAL_ORIGIN':
             hint = "Move mouse = radial pivot | Ctrl = grid snap | LMB / Enter / Shift+O = accept"
+        elif self.phase == 'WEDGE':
+            hint = f"Move mouse = real wedge {self.wedge_axis} | X/Y axis | Ctrl 0.1 steps | LMB accept"
+        elif self.phase.startswith('HANDLE_'):
+            hint = f"Drag {self.active_handle} handle | Ctrl snap | release LMB accept | Esc rollback"
         else:
             hint = "Move mouse = depth | E through | R rotate | G move | S scale | LMB confirm"
         self._draw_line(hint, x, y, 13)
         y -= 18
         self._draw_line("X Difference | J Join | K Slice | Shift+K Knife | T Extract | P Make", x, y, 12)
         y -= 18
-        self._draw_line("A Array mode | Shift+A Radial | M Mirror | W Taper | Z Solidify | E Through", x, y, 12)
+        self._draw_line("A Array mode | Shift+A Radial | M Mirror | W Taper | Alt+W Real Wedge | Z Solidify | E Through", x, y, 12)
         y -= 18
         self._draw_line("G Move / Shift+G GeoSnap | S Scale / Shift+S GridSnap | Ctrl SnapDots | R Rotate", x, y, 12)
         y -= 18
@@ -318,6 +459,11 @@ class KORO_OT_box_cutter(Operator):
         self.depth_scale = 1.0
         self.scale_base_depth = 1.0
         self.extrude_direction = s.extrude_direction
+        self.wedge_enabled = s.wedge_enabled
+        self.wedge_factor = s.wedge_factor
+        self.wedge_axis = s.wedge_axis
+        self.hover_handle = 'NONE'
+        self.active_handle = 'NONE'
         self._add_draw_handler(context)
         context.window.cursor_modal_set('CROSSHAIR')
         context.window_manager.modal_handler_add(self)
@@ -546,7 +692,7 @@ class KORO_OT_box_cutter(Operator):
             self.cutter, s.cutter_bevel_width, s.cutter_bevel_segments,
             self.cutter_bevel_enabled,
         )
-        utils.ensure_taper(self.cutter, self.taper_enabled, self.taper_factor)
+        utils.ensure_taper(self.cutter, self.taper_enabled and not self.wedge_enabled, self.taper_factor)
         linear = self.array_mode == 'LINEAR'
         radial = self.array_mode == 'RADIAL'
         utils.ensure_array(
@@ -574,7 +720,12 @@ class KORO_OT_box_cutter(Operator):
         z_min, z_max = self._z_range(context)
         s = self._settings(context)
         inset = self.inset_amount if self.inset_enabled else 0.0
-        if self.live_solidify:
+        if self.wedge_enabled:
+            utils.ensure_solidify(self.cutter, False)
+            ok = utils.update_wedge_prism_mesh(
+                self.cutter, points, z_min, z_max, inset, self.wedge_factor, self.wedge_axis
+            )
+        elif self.live_solidify:
             center_z = (z_min + z_max) * 0.5
             ok = utils.update_profile_mesh(self.cutter, points, center_z, inset)
             utils.ensure_solidify(
@@ -837,6 +988,22 @@ class KORO_OT_box_cutter(Operator):
         self.taper_factor = max(-10.0, min(10.0, factor))
         self._update_mesh(context)
 
+    def _begin_wedge(self, event):
+        if not self.cutter or self.phase not in {'DRAW', 'DEPTH'}:
+            return
+        self.previous_phase = self.phase
+        self.phase = 'WEDGE'
+        self.wedge_enabled = True
+        self.wedge_start_x = event.mouse_region_x
+        self.wedge_base_factor = self.wedge_factor
+
+    def _update_wedge(self, context, event):
+        factor = self.wedge_base_factor + (event.mouse_region_x - self.wedge_start_x) * 0.01
+        if event.ctrl:
+            factor = round(factor * 10.0) / 10.0
+        self.wedge_factor = max(-4.0, min(4.0, factor))
+        self._update_mesh(context)
+
     def _begin_offset(self, event):
         if not self.cutter or self.phase not in {'DRAW', 'DEPTH'}:
             return
@@ -935,7 +1102,7 @@ class KORO_OT_box_cutter(Operator):
         return self._finish(context)
 
     def _accept_transform_phase(self):
-        if self.phase in {'MOVE', 'SCALE', 'TAPER', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
+        if self.phase in {'MOVE', 'SCALE', 'TAPER', 'WEDGE', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
             self.phase = self.previous_phase if self.previous_phase in {'DRAW', 'DEPTH'} else 'DEPTH'
             self.transform_axis = 'FREE'
 
@@ -964,6 +1131,12 @@ class KORO_OT_box_cutter(Operator):
         if self.phase == 'TAPER':
             self.taper_factor = self.taper_base_factor
             self.taper_enabled = abs(self.taper_factor) > 1e-8
+            self._update_mesh(context)
+            self._accept_transform_phase()
+            return True
+        if self.phase == 'WEDGE':
+            self.wedge_factor = self.wedge_base_factor
+            self.wedge_enabled = abs(self.wedge_factor) > 1e-8
             self._update_mesh(context)
             self._accept_transform_phase()
             return True
@@ -1004,6 +1177,9 @@ class KORO_OT_box_cutter(Operator):
         s.mirror_origin = self.mirror_origin
         s.radial_origin = self.radial_origin if self.radial_origin is not None else Vector((0.0, 0.0))
         s.extrude_direction = self.extrude_direction
+        s.wedge_enabled = self.wedge_enabled
+        s.wedge_factor = self.wedge_factor
+        s.wedge_axis = self.wedge_axis
 
     def _finish(self, context):
         s = self._settings(context)
@@ -1096,6 +1272,21 @@ class KORO_OT_box_cutter(Operator):
             self.cutter["koro_offset_amount"] = float(self.offset_amount)
             self.cutter["koro_depth"] = float(self.depth)
             self.cutter["koro_through"] = bool(self.through_cut or self.lazorcut)
+            utils.store_cutter_profile_metadata(
+                self.cutter, self._profile_points(False),
+                operation=self.cutter.get("koro_operation", 'DIFFERENCE'),
+                shape=self.shape, inset_enabled=bool(self.inset_enabled), inset_amount=float(self.inset_amount),
+                offset_amount=float(self.offset_amount), depth=float(self.depth), depth_scale=float(self.depth_scale),
+                through=bool(self.through_cut or self.lazorcut), through_margin=float(s.through_margin),
+                surface_offset=float(s.surface_offset), live_solidify=bool(self.live_solidify), solidify_even=bool(s.solidify_even),
+                extrude_direction=self.extrude_direction, cutter_bevel_enabled=bool(self.cutter_bevel_enabled),
+                cutter_bevel_width=float(s.cutter_bevel_width), cutter_bevel_segments=int(s.cutter_bevel_segments),
+                taper_enabled=bool(self.taper_enabled), taper_factor=float(self.taper_factor),
+                wedge_enabled=bool(self.wedge_enabled), wedge_factor=float(self.wedge_factor), wedge_axis=self.wedge_axis,
+                array_mode=self.array_mode, array_count=int(s.array_count), array_gap=float(s.array_gap),
+                radial_sweep=float(s.radial_sweep), radial_origin=self.radial_origin if self.radial_origin is not None else Vector((0.0,0.0)),
+                mirror_mode=self.mirror_mode, mirror_origin=self.mirror_origin, draw_origin=self.draw_origin,
+            )
             utils.mark_cutter_created(context.scene, self.cutter)
 
         if target_finish:
@@ -1163,7 +1354,10 @@ class KORO_OT_box_cutter(Operator):
             context.area.tag_redraw()
 
         if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
-            if self.phase in {'ROTATE', 'MOVE', 'SCALE', 'TAPER', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
+            if self.phase in {'HANDLE_DEPTH', 'HANDLE_INSET', 'HANDLE_BEVEL'}:
+                self._cancel_parameter_handle(context)
+                return {'RUNNING_MODAL'}
+            if self.phase in {'ROTATE', 'MOVE', 'SCALE', 'TAPER', 'WEDGE', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
                 self._cancel_transform_phase(context)
                 return {'RUNNING_MODAL'}
             return self._cancel(context)
@@ -1186,6 +1380,10 @@ class KORO_OT_box_cutter(Operator):
                 return {'RUNNING_MODAL'}
             if event.type in {'X', 'Y', 'Z'} and self.phase in {'MOVE', 'SCALE', 'ROTATE'}:
                 self._set_transform_axis(context, event, event.type)
+                return {'RUNNING_MODAL'}
+            if event.type in {'X', 'Y'} and self.phase == 'WEDGE':
+                self.wedge_axis = event.type
+                self._update_mesh(context)
                 return {'RUNNING_MODAL'}
             if event.type == 'C' and self.shape == 'BOX':
                 self._cycle_origin(context)
@@ -1259,7 +1457,12 @@ class KORO_OT_box_cutter(Operator):
                     self._begin_rotate(event)
                 return {'RUNNING_MODAL'}
             if event.type == 'W':
-                if self.phase == 'TAPER':
+                if event.alt:
+                    if self.phase == 'WEDGE':
+                        self._accept_transform_phase()
+                    else:
+                        self._begin_wedge(event)
+                elif self.phase == 'TAPER':
                     self._accept_transform_phase()
                 elif event.shift:
                     self.taper_enabled = not self.taper_enabled
@@ -1308,9 +1511,12 @@ class KORO_OT_box_cutter(Operator):
                     self._update_mesh(context)
                 return {'RUNNING_MODAL'}
             if event.type == 'SPACE':
+                if self.phase in {'HANDLE_DEPTH', 'HANDLE_INSET', 'HANDLE_BEVEL'}:
+                    self._accept_parameter_handle()
+                    return {'RUNNING_MODAL'}
                 if self.phase in {'DRAW', 'NGON'}:
                     return self._activate_lazorcut(context)
-                if self.phase in {'ROTATE', 'MOVE', 'SCALE', 'TAPER', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
+                if self.phase in {'ROTATE', 'MOVE', 'SCALE', 'TAPER', 'WEDGE', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
                     if self.phase == 'ROTATE':
                         self._accept_rotate()
                     else:
@@ -1319,13 +1525,16 @@ class KORO_OT_box_cutter(Operator):
                 if self.phase == 'DEPTH':
                     return self._finish(context)
             if event.type in {'RET', 'NUMPAD_ENTER'}:
+                if self.phase in {'HANDLE_DEPTH', 'HANDLE_INSET', 'HANDLE_BEVEL'}:
+                    self._accept_parameter_handle()
+                    return {'RUNNING_MODAL'}
                 if self.phase == 'NGON':
                     self._close_ngon(context, event)
                     return {'RUNNING_MODAL'}
                 if self.phase == 'ROTATE':
                     self._accept_rotate()
                     return {'RUNNING_MODAL'}
-                if self.phase in {'MOVE', 'SCALE', 'TAPER', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
+                if self.phase in {'MOVE', 'SCALE', 'TAPER', 'WEDGE', 'OFFSET', 'INSET', 'RADIAL_ORIGIN'}:
                     self._accept_transform_phase()
                     return {'RUNNING_MODAL'}
                 if self.phase == 'DEPTH':
@@ -1351,9 +1560,18 @@ class KORO_OT_box_cutter(Operator):
                 self._accept_transform_phase()
                 return {'RUNNING_MODAL'}
             elif event.value == 'PRESS' and self.phase == 'DEPTH':
+                picked = self._pick_parameter_handle(context, event)
+                if picked != 'NONE':
+                    self._begin_parameter_handle(context, event, picked)
+                    return {'RUNNING_MODAL'}
                 return self._finish(context)
+            elif event.value == 'RELEASE' and self.phase in {'HANDLE_DEPTH', 'HANDLE_INSET', 'HANDLE_BEVEL'}:
+                self._accept_parameter_handle()
+                return {'RUNNING_MODAL'}
 
         if event.type == 'MOUSEMOVE':
+            if self.phase not in {'HANDLE_DEPTH', 'HANDLE_INSET', 'HANDLE_BEVEL'}:
+                self.hover_handle = self._pick_parameter_handle(context, event)
             if self.paused:
                 if self.phase == 'WAIT' and self._geometry_snap_active(context, event):
                     self._geometry_point(context, event)
@@ -1370,6 +1588,10 @@ class KORO_OT_box_cutter(Operator):
                 self._update_scale(context, event)
             elif self.phase == 'TAPER':
                 self._update_taper(context, event)
+            elif self.phase == 'WEDGE':
+                self._update_wedge(context, event)
+            elif self.phase in {'HANDLE_DEPTH', 'HANDLE_INSET', 'HANDLE_BEVEL'}:
+                self._update_parameter_handle(context, event)
             elif self.phase == 'OFFSET':
                 self._update_offset(context, event)
             elif self.phase == 'INSET':
