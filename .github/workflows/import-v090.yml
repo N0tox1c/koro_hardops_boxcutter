@@ -1,0 +1,75 @@
+name: Import KORO v0.9.0
+
+on:
+  push:
+    branches: [v0.9-dev]
+    paths:
+      - '.koro_upload_v09/**'
+      - '.github/workflows/import-v090.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  import-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: v0.9-dev
+
+      - name: Reconstruct, verify and unpack v0.9.0
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, zipfile, shutil
+
+          upload = Path('.koro_upload_v09')
+          parts = sorted(upload.glob('part_*')) if upload.exists() else []
+          expected_parts = 8
+          if len(parts) != expected_parts:
+              print(f'Waiting for upload parts: {len(parts)}/{expected_parts}')
+              raise SystemExit(0)
+
+          expected = '164d03bcfa29d855a973151ff568580b601ade1ae2b553daa4d85ed9abe485d9'
+          encoded = ''.join(p.read_text(encoding='utf-8') for p in parts)
+          data = base64.b64decode(encoded, validate=True)
+          digest = hashlib.sha256(data).hexdigest()
+          print('ZIP SHA-256:', digest)
+          if digest != expected:
+              raise SystemExit(f'SHA-256 mismatch: expected {expected}, got {digest}')
+
+          release_dir = Path('releases')
+          release_dir.mkdir(exist_ok=True)
+          zip_path = release_dir / 'koro_hardops_boxcutter-0.9.0.zip'
+          zip_path.write_bytes(data)
+
+          with zipfile.ZipFile(zip_path) as zf:
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f'Corrupt ZIP member: {bad}')
+              zf.extractall('.')
+
+          shutil.rmtree(upload)
+          Path('.github/workflows/import-v090.yml').unlink(missing_ok=True)
+          PY
+
+      - name: Commit imported source and release ZIP
+        shell: bash
+        run: |
+          if [ -d .koro_upload_v09 ]; then
+            echo "Upload is not complete yet; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Develop KORO HardOps BoxCutter v0.9.0"
+          git push origin HEAD:v0.9-dev
