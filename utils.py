@@ -656,6 +656,65 @@ def ensure_ccw(points):
     return pts if polygon_area_2d(pts) >= 0.0 else list(reversed(pts))
 
 
+def polygon_is_simple(points, eps=1e-10):
+    """Return True for a non-degenerate 2D polygon without self intersections."""
+    pts=[(float(p[0]), float(p[1])) for p in points]
+    n=len(pts)
+    if n < 3 or abs(polygon_area_2d(pts)) <= eps:
+        return False
+
+    def orient(a,b,c):
+        return (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+
+    def on_segment(a,b,p):
+        return (min(a[0],b[0])-eps <= p[0] <= max(a[0],b[0])+eps and
+                min(a[1],b[1])-eps <= p[1] <= max(a[1],b[1])+eps and
+                abs(orient(a,b,p)) <= eps)
+
+    def intersects(a,b,c,d):
+        o1,o2,o3,o4=orient(a,b,c),orient(a,b,d),orient(c,d,a),orient(c,d,b)
+        if ((o1 > eps and o2 < -eps) or (o1 < -eps and o2 > eps)) and ((o3 > eps and o4 < -eps) or (o3 < -eps and o4 > eps)):
+            return True
+        return ((abs(o1)<=eps and on_segment(a,b,c)) or (abs(o2)<=eps and on_segment(a,b,d)) or
+                (abs(o3)<=eps and on_segment(c,d,a)) or (abs(o4)<=eps and on_segment(c,d,b)))
+
+    for i in range(n):
+        a,b=pts[i],pts[(i+1)%n]
+        for j in range(i+1,n):
+            if j == i or j == (i+1)%n or (i == 0 and j == n-1):
+                continue
+            c,d=pts[j],pts[(j+1)%n]
+            if intersects(a,b,c,d):
+                return False
+    return True
+
+
+def store_profile_points(cutter, points):
+    """Replace only the editable 2D profile metadata on a parametric cutter."""
+    pts=ensure_ccw(points)
+    if cutter is None or len(pts) < 3 or not polygon_is_simple(pts):
+        return False
+    flat=[]
+    for x,y in pts:
+        flat.extend((float(x),float(y)))
+    cutter['koro_profile_points']=flat
+    cutter['koro_profile_version']=2
+    return True
+
+
+def profile_plane_world(context, cutter, target=None):
+    """Return (world point, world normal, local_z) for interactive profile editing."""
+    if cutter is None:
+        return None, None, 0.0
+    if target is None:
+        target=find_target_for_cutter(context.scene, cutter)
+    zmin,zmax=_metadata_z_range(context,cutter,target)
+    z=(zmin+zmax)*0.5
+    point=cutter.matrix_world @ Vector((0.0,0.0,z))
+    normal=(cutter.matrix_world.to_3x3() @ Vector((0.0,0.0,1.0))).normalized()
+    return point,normal,z
+
+
 def _line_intersection_2d(p1, d1, p2, d2, eps=1e-9):
     cross = d1[0] * d2[1] - d1[1] * d2[0]
     if abs(cross) < eps:
