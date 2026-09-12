@@ -1,0 +1,67 @@
+name: Publish KORO Releases
+
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-releases.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify v0.9.0
+        shell: bash
+        run: |
+          cat .koro_upload_v09/part_* | tr -d '\r\n' | base64 -d > /tmp/koro_hardops_boxcutter-0.9.0.zip
+          echo "164d03bcfa29d855a973151ff568580b601ade1ae2b553daa4d85ed9abe485d9  /tmp/koro_hardops_boxcutter-0.9.0.zip" | sha256sum -c -
+          echo "cf38e7f11fdaedf22067f5520348549ae26f75924b6042e2e71771a7713c9f33  releases/koro_hardops_boxcutter-0.8.0.zip" | sha256sum -c -
+
+      - name: Update main to v0.9.0 and clean staging files
+        shell: bash
+        run: |
+          cp /tmp/koro_hardops_boxcutter-0.9.0.zip releases/koro_hardops_boxcutter-0.9.0.zip
+          python - <<'PY'
+          import zipfile
+          with zipfile.ZipFile('/tmp/koro_hardops_boxcutter-0.9.0.zip') as zf:
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f'Corrupt ZIP member: {bad}')
+              zf.extractall('.')
+          PY
+          rm -rf .koro_upload_v09
+          rm -f .github/workflows/import-v090.yml
+          rm -f .github/workflows/publish-releases.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Release KORO HardOps BoxCutter v0.9.0"
+          git push
+
+      - name: Publish GitHub Release v0.8.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view v0.8.0 >/dev/null 2>&1; then
+            gh release upload v0.8.0 releases/koro_hardops_boxcutter-0.8.0.zip --clobber
+          else
+            gh release create v0.8.0 releases/koro_hardops_boxcutter-0.8.0.zip --target main --title "KORO HardOps + BoxCutter v0.8.0" --notes "Blender 5.2+ installable extension ZIP."
+          fi
+
+      - name: Publish GitHub Release v0.9.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view v0.9.0 >/dev/null 2>&1; then
+            gh release upload v0.9.0 /tmp/koro_hardops_boxcutter-0.9.0.zip --clobber
+          else
+            gh release create v0.9.0 /tmp/koro_hardops_boxcutter-0.9.0.zip --target main --title "KORO HardOps + BoxCutter v0.9.0" --notes "Blender 5.2+ installable extension ZIP. Adds parametric edit, drag handles, real wedge, Array Modal and Dice Modal."
+          fi
